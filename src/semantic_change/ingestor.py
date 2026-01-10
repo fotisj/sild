@@ -8,6 +8,12 @@ from collections import Counter
 class Ingestor:
     def __init__(self, model: str = "en_core_web_lg"):
         try:
+            # Check for GPU availability
+            if spacy.prefer_gpu():
+                print("GPU usage enabled for spaCy.")
+            else:
+                print("GPU not available or not supported by spaCy installation. Using CPU.")
+
             # Disable parser and ner for speed and memory efficiency
             print(f"Loading spaCy model: {model}")
             self.nlp = spacy.load(model, disable=["parser", "ner"])
@@ -124,7 +130,7 @@ class Ingestor:
                     sent_tokens_data
                 )
 
-    def preprocess_corpus(self, input_dir: str, db_path: str, max_files: int = None) -> Dict[str, Any]:
+    def preprocess_corpus(self, input_dir: str, db_path: str, max_files: int = None, progress_callback=None) -> Dict[str, Any]:
         """
         Processes text files in a directory and saves them to a SQLite DB.
         """
@@ -137,16 +143,24 @@ class Ingestor:
         conn = self._init_db(output_db_path)
         count = 0
         
-        # Statistics (calculated on the fly or queryable later - let's do basic counting here)
-        # Actually, for "all words" task, we can just query the DB later for stats.
-        # But to match interface, we can return empty or basic stats.
-        
         try:
-            for txt_file in input_path.rglob('*.txt'):
-                if max_files and count >= max_files:
-                    break
-                print(f"Processing {txt_file}...")
+            files = list(input_path.rglob('*.txt'))
+            if max_files:
+                files = files[:max_files]
+            
+            total_files = len(files)
+            print(f"Found {total_files} files to ingest.")
+            
+            if progress_callback:
+                progress_callback(0, total_files, "Ingesting files")
                 
+            # Use tqdm if no callback is provided
+            iterator = files
+            if not progress_callback:
+                from tqdm import tqdm
+                iterator = tqdm(files, desc="Ingesting", unit="file")
+            
+            for i, txt_file in enumerate(iterator):
                 # Wrap each file processing in a transaction
                 try:
                     self.process_file_to_db(str(txt_file), conn)
@@ -155,6 +169,9 @@ class Ingestor:
                 except Exception as e:
                     print(f"Error processing {txt_file}: {e}")
                     conn.rollback()
+                
+                if progress_callback:
+                    progress_callback(i + 1, total_files, f"Ingesting: {txt_file.name}")
                     
         finally:
             conn.close()

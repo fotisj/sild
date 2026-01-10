@@ -63,3 +63,16 @@ class VectorStore:
 
     def count(self, collection_name: str) -> int:
         return self.get_or_create_collection(collection_name).count()
+
+    def delete_collection(self, collection_name: str):
+        """Deletes a collection if it exists."""
+        try:
+            self.client.delete_collection(collection_name)
+            print(f"Deleted collection: {collection_name}")
+        except Exception as e:
+            # Collection likely doesn't exist, which is fine
+            print(f"Collection {collection_name} could not be deleted (might not exist): {e}")
+
+    def list_collections(self) -> List[str]:
+        """Returns a list of all collection names."""
+        return [c.name for c in self.client.list_collections()]

@@ -1,0 +1,18 @@
+# Data directories
+data/
+data_source/
+data_gutenberg/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Temp
+*.tmp.*

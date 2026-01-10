@@ -4,6 +4,8 @@ import glob
 import numpy as np
 import argparse
 import sqlite3
+from typing import List, Dict, Tuple, Any, Optional
+from collections import defaultdict, Counter
 from semantic_change.corpus import CorpusManager
 from semantic_change.embedding import BertEmbedder
 from semantic_change.wsi import WordSenseInductor
@@ -41,7 +43,130 @@ def run_single_analysis(
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
 
-    # 0. Cleanup old results
+def get_chroma_neighbors(
+    vector_store: VectorStore,
+    collection_name: str,
+    centroid: np.ndarray,
+    target_word: str = None,
+    n_neighbors: int = 10,
+    max_candidates: int = 500
+) -> Dict[str, np.ndarray]:
+    """
+    Finds nearest neighbors by iteratively querying the vector store.
+    Handles high-frequency word dominance by querying in batches until 
+    enough unique lemmas are found.
+    """
+    
+    unique_neighbors = {} # lemma -> vector
+    candidates_seen = 0
+    batch_size = n_neighbors * 5
+    
+    # Prepare skip list
+    skip_lemmas = set()
+    if target_word:
+        skip_lemmas.add(target_word.lower())
+    
+    # We can't easily "exclude" IDs in Chroma without a complex filter.
+    # Instead, we just query a large batch. If that's not enough, we query more?
+    # Chroma's query doesn't support offset.
+    # So we simply query a large enough number. 
+    # If the user wants 10 neighbors, querying 100 or 200 should usually be enough.
+    # If a word is extremely frequent (e.g. 1000 times), we might miss others.
+    # Ideally, we'd use a where clause to exclude already found words, but Chroma 
+    # 'where' clause on metadata 'lemma' $ne '...' might be inefficient if list is long.
+    
+    # Strategy: Query a large batch (e.g. 500).
+    try:
+        results = vector_store.query(
+            collection_name=collection_name,
+            query_embeddings=[centroid],
+            n_results=max_candidates
+        )
+    except Exception as e:
+        print(f"Vector store query failed: {e}")
+        return {}
+        
+    if not results or not results['metadatas']:
+        return {}
+        
+    metas = results['metadatas'][0]
+    vecs = results['embeddings'][0] if 'embeddings' in results and results['embeddings'] else []
+    
+    # Tally up
+    lemma_counts = Counter()
+    lemma_vectors_sum = defaultdict(lambda: np.zeros(centroid.shape))
+    
+    for i, m in enumerate(metas):
+        lemma = m.get('lemma', '').lower()
+        if not lemma or len(lemma) < 2: continue
+        if lemma in skip_lemmas: continue
+        
+        lemma_counts[lemma] += 1
+        
+        if vecs:
+            v = np.array(vecs[i])
+            lemma_vectors_sum[lemma] += v
+            
+    # Get top frequent unique lemmas from this batch
+    # Note: "frequent" in the neighborhood means "dense" which is good.
+    # But we want the top N *closest*? 
+    # Chroma returns them sorted by distance.
+    # So the first appearance of a lemma is its closest instance.
+    # We should probably prioritize by "first appearance rank" rather than "count in top 500".
+    # Let's just take the unique lemmas in order of appearance in the results.
+    
+    top_unique = []
+    seen = set()
+    for i, m in enumerate(metas):
+        lemma = m.get('lemma', '').lower()
+        if not lemma or len(lemma) < 2: continue
+        if lemma in skip_lemmas: continue
+        if lemma in seen: continue
+        
+        seen.add(lemma)
+        
+        # Calculate mean vector for this lemma (using all instances found so far? 
+        # Or just this one? Using mean of all instances in the neighborhood is cleaner)
+        # We computed sum and count above.
+        mean_vec = lemma_vectors_sum[lemma] / lemma_counts[lemma]
+        top_unique.append((lemma, mean_vec))
+        
+        if len(top_unique) >= n_neighbors:
+            break
+            
+    return {lemma: vec for lemma, vec in top_unique}
+
+def run_single_analysis(
+    target_word="current",
+    db_path_t1="data/corpus_t1.db",
+    db_path_t2="data/corpus_t2.db",
+    period_t1_label="1800",
+    period_t2_label="1900",
+    model_name="bert-base-uncased",
+    k_neighbors=10,
+    min_cluster_size=3,
+    n_clusters=3,
+    wsi_algorithm="hdbscan",
+    pos_filter=None,
+    embedder=None,
+    # Pre-clustering dimensionality reduction
+    clustering_reduction=None,  # None, 'pca', or 'umap'
+    clustering_n_components=50,
+    # Visualization dimensionality reduction
+    viz_reduction='pca',  # 'pca', 'tsne', or 'umap'
+    # Legacy parameters (for backwards compatibility)
+    use_umap=None,  # Deprecated, use clustering_reduction instead
+    umap_n_components=None,  # Deprecated, use clustering_n_components instead
+    db_path_1800=None,  # Deprecated, use db_path_t1
+    db_path_1900=None,  # Deprecated, use db_path_t2
+    n_samples=50,
+    viz_max_instances=100,
+    context_window=0,
+    n_top_sentences=10, # Re-added for signature compatibility
+    k_per_sentence=6    # Re-added for signature compatibility
+):
+    OUTPUT_DIR = "output"
+
     print("--- Cleaning up old visualizations ---")
     # ... cleanup logic ... (omitted for brevity in replacement context but kept in code)
     for f in glob.glob(os.path.join(OUTPUT_DIR, "neighbors_cluster_*.html")):
@@ -74,16 +199,23 @@ def run_single_analysis(
     # 2. Check Vector Store or Compute Embeddings
     print("--- Checking Vector Store ---")
 
-    def get_collection_name(period_label, model):
+    def get_collection_name(period_id, model):
         safe_model = model.replace("/", "_").replace("-", "_")
-        safe_label = period_label.replace(" ", "_").replace("/", "_")
-        return f"embeddings_{safe_label}_{safe_model}"
+        # Use t1/t2 explicitly for internal storage, not the user label
+        # But we need to map period_t1_label to "t1". 
+        # Since we just have two variables, we can hardcode the calls.
+        return f"embeddings_{period_id}_{safe_model}"
 
-    coll_t1 = get_collection_name(period_t1_label, model_name)
-    coll_t2 = get_collection_name(period_t2_label, model_name)
+    # Use "t1" and "t2" explicitly as defined in run_batch_analysis.py
+    coll_t1 = get_collection_name("t1", model_name)
+    coll_t2 = get_collection_name("t2", model_name)
+    
+    # Hold reference to vector_store for later neighbor query
+    v_store_ref = None
     
     try:
         v_store = VectorStore(persistence_path="data/chroma_db")
+        v_store_ref = v_store
         
         def fetch_from_store(coll_name, db_path):
             try:
@@ -101,12 +233,32 @@ def run_single_analysis(
                     conn = sqlite3.connect(db_path)
                     cursor = conn.cursor()
                     sents = []
+                    filenames = []
                     spans = []
                     for m in data['metadatas']:
                         sent_id = m['sentence_id']
-                        # Get sentence text
-                        row = cursor.execute("SELECT text FROM sentences WHERE id=?", (sent_id,)).fetchone()
-                        sents.append(row[0] if row else "[Missing Sentence]")
+                        # Get sentence text and filename
+                        # We need to join with files table
+                        try:
+                            row = cursor.execute("""
+                                SELECT s.text, f.filename 
+                                FROM sentences s 
+                                JOIN files f ON s.file_id = f.id 
+                                WHERE s.id=?
+                            """, (sent_id,)).fetchone()
+                            
+                            if row:
+                                sents.append(row[0])
+                                filenames.append(row[1])
+                            else:
+                                sents.append("[Missing Sentence]")
+                                filenames.append("Unknown")
+                        except sqlite3.OperationalError:
+                            # Fallback if files table join fails (e.g. old DB schema?)
+                            row = cursor.execute("SELECT text FROM sentences WHERE id=?", (sent_id,)).fetchone()
+                            sents.append(row[0] if row else "[Missing Sentence]")
+                            filenames.append("Unknown")
+
                         # Get char offsets directly from metadata (stored by batch analysis)
                         start_char = m.get('start_char')
                         end_char = m.get('end_char')
@@ -115,17 +267,18 @@ def run_single_analysis(
                         else:
                             spans.append(None)
                     conn.close()
-                    return np.array(data['embeddings']), sents, spans
+                    return np.array(data['embeddings']), sents, spans, filenames
             except Exception as e:
                 print(f"Warning: fetch_from_store failed: {e}")
-            return None, None, None
+            return None, None, None, None
 
-        emb_t1, valid_sents_t1, spans_t1 = fetch_from_store(coll_t1, db_path_t1)
-        emb_t2, valid_sents_t2, spans_t2 = fetch_from_store(coll_t2, db_path_t2)
+        emb_t1, valid_sents_t1, spans_t1, filenames_t1 = fetch_from_store(coll_t1, db_path_t1)
+        emb_t2, valid_sents_t2, spans_t2, filenames_t2 = fetch_from_store(coll_t2, db_path_t2)
     except Exception as e:
         print(f"Could not initialize Vector Store: {e}")
         emb_t1, emb_t2 = None, None
         spans_t1, spans_t2 = None, None
+        filenames_t1, filenames_t2 = None, None
 
     # Helper for dynamic context
     def prepare_batch_items(samples, window):
@@ -178,7 +331,11 @@ def run_single_analysis(
 
         emb_t1 = np.array([x['vector'] for x in extracted])
         id_to_text = {x['id']: x['text'] for x in batch_items_t1}
+        # Create map from sentence_id to filename (basename of file_path)
+        id_to_filename = {s['sentence_id']: os.path.basename(s['file_path']) if s.get('file_path') else "Unknown" for s in samples_t1}
+        
         valid_sents_t1 = [id_to_text[x['sentence_id']] for x in extracted]
+        filenames_t1 = [id_to_filename.get(x['sentence_id'], "Unknown") for x in extracted]
         # Track word positions for highlighting
         spans_t1 = [(x['start_char'], x['end_char']) for x in extracted]
 
@@ -195,7 +352,10 @@ def run_single_analysis(
 
         emb_t2 = np.array([x['vector'] for x in extracted])
         id_to_text = {x['id']: x['text'] for x in batch_items_t2}
+        id_to_filename = {s['sentence_id']: os.path.basename(s['file_path']) if s.get('file_path') else "Unknown" for s in samples_t2}
+        
         valid_sents_t2 = [id_to_text[x['sentence_id']] for x in extracted]
+        filenames_t2 = [id_to_filename.get(x['sentence_id'], "Unknown") for x in extracted]
         # Track word positions for highlighting
         spans_t2 = [(x['start_char'], x['end_char']) for x in extracted]
 
@@ -207,6 +367,7 @@ def run_single_analysis(
     all_embeddings = np.vstack([emb_t1, emb_t2])
     time_labels = np.array([period_t1_label] * len(emb_t1) + [period_t2_label] * len(emb_t2))
     all_sentences = np.array(valid_sents_t1 + valid_sents_t2)
+    all_filenames = np.array((filenames_t1 or []) + (filenames_t2 or []))
 
     # Combine highlight spans (None if from cache without span info)
     if spans_t1 is not None and spans_t2 is not None:
@@ -263,7 +424,7 @@ def run_single_analysis(
     sense_labels = wsi.fit_predict(clustering_embeddings)
     
     # Helper to limit visualization data
-    def subsample_for_viz(embs, labs, sents, max_per_class, spans=None, return_indices=False):
+    def subsample_for_viz(embs, labs, sents, fnames, max_per_class, spans=None, return_indices=False):
         unique_labs = np.unique(labs)
         indices_to_keep = []
         for l in unique_labs:
@@ -280,8 +441,8 @@ def run_single_analysis(
             sub_spans = [spans[i] for i in indices_to_keep]
 
         if return_indices:
-            return embs[indices_to_keep], labs[indices_to_keep], sents[indices_to_keep], sub_spans, indices_to_keep
-        return embs[indices_to_keep], labs[indices_to_keep], sents[indices_to_keep], sub_spans
+            return embs[indices_to_keep], labs[indices_to_keep], sents[indices_to_keep], fnames[indices_to_keep], sub_spans, indices_to_keep
+        return embs[indices_to_keep], labs[indices_to_keep], sents[indices_to_keep], fnames[indices_to_keep], sub_spans
 
     # 4. Visualization
     print(f"--- Visualizing (reduction: {viz_reduction.upper()}) ---")
@@ -289,8 +450,8 @@ def run_single_analysis(
 
     # Subsample ONCE for all plots to ensure consistency
     # We use sense_labels for balancing to ensure all clusters are represented
-    viz_embs_raw, viz_sense_labs, viz_sents, viz_spans, viz_indices = subsample_for_viz(
-        all_embeddings, sense_labels, all_sentences, viz_max_instances, all_highlight_spans,
+    viz_embs_raw, viz_sense_labs, viz_sents, viz_fnames, viz_spans, viz_indices = subsample_for_viz(
+        all_embeddings, sense_labels, all_sentences, all_filenames, viz_max_instances, all_highlight_spans,
         return_indices=True
     )
     viz_time_labs = time_labels[viz_indices]
@@ -304,6 +465,7 @@ def run_single_analysis(
         viz_2d,
         labels=viz_time_labs,
         sentences=viz_sents,
+        filenames=viz_fnames,
         title=f"'{target_word}' by Time Period",
         save_path=os.path.join(OUTPUT_DIR, "time_period.html"),
         highlight_spans=viz_spans
@@ -314,6 +476,7 @@ def run_single_analysis(
         viz_2d,
         labels=viz_sense_labs,
         sentences=viz_sents,
+        filenames=viz_fnames,
         title=f"'{target_word}' by Sense Cluster",
         save_path=os.path.join(OUTPUT_DIR, "sense_clusters.html"),
         highlight_spans=viz_spans
@@ -325,6 +488,7 @@ def run_single_analysis(
         sense_labels=viz_sense_labs,
         time_labels=list(viz_time_labs),
         sentences=viz_sents,
+        filenames=viz_fnames,
         title=f"'{target_word}' by Sense × Time",
         save_path=os.path.join(OUTPUT_DIR, "sense_time_combined.html"),
         highlight_spans=viz_spans
@@ -334,7 +498,7 @@ def run_single_analysis(
     print("Plotting Neighbors for Sense Clusters...")
     unique_clusters = sorted(list(set(sense_labels)))
     
-    # Ensure embedder is available for neighbor projection
+    # Ensure embedder is available for neighbor projection (fallback)
     if embedder is None:
         embedder = BertEmbedder(model_name=model_name)
 
@@ -345,21 +509,45 @@ def run_single_analysis(
         
         centroid = np.mean(cluster_embs, axis=0)
         
-        # Filter morphological variants and apply POS filter if set
-        neighbors = embedder.get_nearest_neighbors(
-            centroid, 
-            target_word=target_word, 
-            k=k_neighbors, 
-            pos_filter=pos_filter
-        )
+        # Try to use Vector Store first
+        neighbors = {}
+        source_label = "ChromaDB"
         
-        print(f"Cluster {cluster_id} Neighbors: {list(neighbors.keys())}")
+        if v_store_ref:
+            try:
+                print(f"Querying ChromaDB for cluster {cluster_id} neighbors...")
+                n1 = get_chroma_neighbors(v_store_ref, coll_t1, centroid, target_word=target_word, n_neighbors=k_neighbors)
+                n2 = get_chroma_neighbors(v_store_ref, coll_t2, centroid, target_word=target_word, n_neighbors=k_neighbors)
+                
+                # Merge logic: if word in both, take average or closest. 
+                # Simple merge:
+                merged = {**n1, **n2} 
+                # If we have too many, sort by distance to centroid.
+                # Since we only have vectors in the map, we need to recalc distance or just trust the initial top k.
+                # Let's simple slice.
+                neighbors = dict(list(merged.items())[:k_neighbors*2])
+            except Exception as e:
+                print(f"ChromaDB lookup failed: {e}")
+                neighbors = {}
+        
+        # Fallback to MLM if Chroma returned nothing (e.g. store is empty)
+        if not neighbors:
+            source_label = "MLM Projection"
+            print(f"Falling back to MLM projection for cluster {cluster_id}")
+            neighbors = embedder.get_nearest_neighbors(
+                centroid, 
+                target_word=target_word, 
+                k=k_neighbors, 
+                pos_filter=pos_filter
+            )
+        
+        print(f"Cluster {cluster_id} Neighbors ({source_label}): {list(neighbors.keys())}")
         
         viz.plot_neighbors(
             centroid, 
             neighbors, 
             centroid_name=target_word,
-            title=f"Semantic Neighbors for Cluster {cluster_id} (Centroid Projection)",
+            title=f"Semantic Neighbors for Cluster {cluster_id} ({source_label})",
             save_path=os.path.join(OUTPUT_DIR, f"neighbors_cluster_{cluster_id}.html")
         )
     
@@ -382,6 +570,8 @@ if __name__ == "__main__":
     parser.add_argument("--viz-reduction", type=str, default='pca',
                         choices=['pca', 'umap', 'tsne'],
                         help="Dimensionality reduction for visualization (pca, umap, tsne)")
+    parser.add_argument("--n-top-sents", type=int, default=10, help="Number of sentences to use for contextual MLM (fallback)")
+    parser.add_argument("--k-per-sent", type=int, default=6, help="Predictions per sentence for contextual MLM (fallback)")
 
     args = parser.parse_args()
 
@@ -395,5 +585,8 @@ if __name__ == "__main__":
         pos_filter=args.pos,
         clustering_reduction=args.clustering_reduction,
         clustering_n_components=args.clustering_dims,
-        viz_reduction=args.viz_reduction
+        viz_reduction=args.viz_reduction,
+        n_top_sentences=args.n_top_sents,
+        k_per_sentence=args.k_per_sent
     )
+    

@@ -30,6 +30,38 @@ def get_embedder(model_name, layers=None, layer_op='mean', lang='en'):
     from semantic_change.embedding import BertEmbedder
     return BertEmbedder(model_name=model_name, layers=layers, layer_op=layer_op, lang=lang)
 
+def get_available_models():
+    """
+    Scans ChromaDB to find which models have been processed.
+    Returns a list of unique model names.
+    """
+    try:
+        from semantic_change.vector_store import VectorStore
+        v_store = VectorStore(persistence_path="data/chroma_db")
+        collections = v_store.list_collections()
+        models = set()
+        for c in collections:
+            # Expected format: embeddings_t1_{model_safe}
+            if c.startswith("embeddings_t1_"):
+                # Extract safe model name
+                safe_name = c.replace("embeddings_t1_", "")
+                # We can't easily reverse safe_name back to original (e.g. _ -> - or /)
+                # But we can display the safe name, or if we stored mapping, use that.
+                # For now, let's try to beautify or just list it.
+                # Actually, the user input "model_name" is needed for loading the model for inference.
+                # So we need the EXACT HuggingFace ID. 
+                # Reversing the safe name is lossy.
+                # Workaround: Check against the currently configured model?
+                # Better: Just list the safe names and let the user select?
+                # NO, we need to load the model.
+                # Compromise: We will just list the collections as "ID: ..."
+                # and relying on the user to pick the one that matches.
+                # OR better: Store a mapping in a local json file?
+                models.add(safe_name)
+        return sorted(list(models))
+    except Exception:
+        return []
+
 def load_config():
     default_config = {
         "data_dir": "data",
@@ -64,7 +96,6 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             loaded_config = json.load(f)
-            # Merge with defaults to ensure all keys exist
             for key, val in default_config.items():
                 if key not in loaded_config:
                     loaded_config[key] = val
@@ -101,7 +132,7 @@ if "config" not in st.session_state:
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
     "Go to", 
-    ["Analysis Dashboard", "Data Ingestion", "Embeddings Config", "Corpus Reports"]
+    ["Analysis Dashboard", "Data Ingestion", "Embeddings & Models", "Corpus Reports"]
 )
 
 st.sidebar.markdown("---")
@@ -172,6 +203,15 @@ if page == "Data Ingestion":
                 log_container.code("".join(logs[-30:]))  # Keep last 30 lines
 
             start_time = time.time()
+            ingest_pbar = st.progress(0)
+            ingest_status = st.empty()
+            
+            def ingest_progress_callback(current, total, desc):
+                if total > 0:
+                    progress = min(current / total, 1.0)
+                    ingest_pbar.progress(progress)
+                    ingest_status.text(f"{desc} ({current}/{total})")
+
             with st.spinner("Ingesting corpora... This may take a while."):
                 try:
                     from semantic_change.ingestor import Ingestor
@@ -182,10 +222,10 @@ if page == "Data Ingestion":
                         ingestor = Ingestor(model=spacy_model)
 
                         print(f"--- Processing {period_t1_label} from {input_t1} ---")
-                        ingestor.preprocess_corpus(input_t1, db_t1)
+                        ingestor.preprocess_corpus(input_t1, db_t1, progress_callback=ingest_progress_callback)
 
                         print(f"--- Processing {period_t2_label} from {input_t2} ---")
-                        ingestor.preprocess_corpus(input_t2, db_t2)
+                        ingestor.preprocess_corpus(input_t2, db_t2, progress_callback=ingest_progress_callback)
 
                         # Generate initial report
                         print("--- Generating Initial Comparison Report ---")
@@ -201,73 +241,168 @@ if page == "Data Ingestion":
                     st.error(f"Ingestion failed: {e}")
                     st.exception(e)
 
+    st.markdown("---")
+    st.subheader("🗑️ Danger Zone")
+    st.warning("These actions will delete processed data.")
+    
+    if st.button("Wipe SQLite Databases", help="Deletes the corpus_t1.db and corpus_t2.db files."):
+        try:
+            if os.path.exists(db_t1): os.remove(db_t1)
+            if os.path.exists(db_t2): os.remove(db_t2)
+            st.success("SQLite databases deleted.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to delete databases: {e}")
 
-# --- Page: Embeddings Config ---
-elif page == "Embeddings Config":
-    st.title("🧬 Embedding Model Configuration")
+
+# --- Page: Embeddings & Models ---
+elif page == "Embeddings & Models":
+    st.title("🧬 Embeddings & Models")
     
-    st.markdown("Configure the Transformer model used to represent word meanings.")
+    st.markdown("""
+    Manage the LLM models used for semantic analysis. You can generate embeddings for multiple models and switch between them in the Dashboard.
+    """)
     
-    model_name = st.text_input("Hugging Face Model Name", value=st.session_state.config["model_name"])
-    st.session_state.config["model_name"] = model_name
+    tab_new, tab_manage = st.tabs(["Create New Embeddings", "Manage Existing"])
     
-    st.markdown("### Advanced Settings")
-    st.info("Configure which transformer layers to use for generating embeddings.")
-    
-    # Layer Selection
-    layer_options = {
-        "Last Layer (-1)": -1,
-        "2nd Last Layer (-2)": -2,
-        "3rd Last Layer (-3)": -3,
-        "4th Last Layer (-4)": -4
-    }
-    
-    # Map current config to labels
-    default_layers = []
-    current_layers = st.session_state.config.get("layers", [-1])
-    for label, val in layer_options.items():
-        if val in current_layers:
-            default_layers.append(label)
+    # --- Tab: Create New ---
+    with tab_new:
+        st.subheader("Generate Embeddings")
+        st.info("This process uses the chosen model to compute vector representations for the words in your ingested corpus.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            # Common models list to prevent typos
+            common_models = [
+                "bert-base-uncased",
+                "roberta-base",
+                "google/modernbert-base-uncased",
+                "distilbert-base-uncased",
+                "xlm-roberta-base",
+                "Other (Custom)"
+            ]
             
-    selected_labels = st.multiselect(
-        "Layers to Use", 
-        list(layer_options.keys()), 
-        default=default_layers
-    )
-    
-    # Update config based on selection
-    st.session_state.config["layers"] = [layer_options[l] for l in selected_labels]
-    
-    # Combination Method
-    combo_options = ["Mean", "Sum", "Concat"]
-    current_op = st.session_state.config.get("layer_op", "mean").title()
-    if current_op not in combo_options: current_op = "Mean"
-    
-    selected_op = st.selectbox(
-        "Layer Combination Method",
-        combo_options,
-        index=combo_options.index(current_op)
-    )
-    st.session_state.config["layer_op"] = selected_op.lower()
-    
-    lang_code = st.text_input("Language Code (for alignment)", value=st.session_state.config.get("lang", "en"))
-    st.session_state.config["lang"] = lang_code
+            # Try to match current config to list
+            current_model_val = st.session_state.config["model_name"]
+            default_index = 0
+            if current_model_val in common_models:
+                default_index = common_models.index(current_model_val)
+            else:
+                default_index = common_models.index("Other (Custom)")
+            
+            selected_model_option = st.selectbox("Select Model", common_models, index=default_index)
+            
+            if selected_model_option == "Other (Custom)":
+                new_model_name = st.text_input("Hugging Face Model ID", value=current_model_val, help="e.g. bert-large-uncased")
+            else:
+                new_model_name = selected_model_option
+                
+            st.session_state.config["model_name"] = new_model_name
+            
+            min_freq_val = st.number_input("Minimum Frequency", min_value=5, value=st.session_state.config.get("min_freq", 25), step=5)
+            st.session_state.config["min_freq"] = min_freq_val
+            
+        with col2:
+            custom_words_input = st.text_area("Custom Words (optional)", 
+                                              placeholder="e.g. apple, banana\n(comma or newline separated)",
+                                              help="Add specific words to the batch processing list, regardless of frequency.")
 
-    if st.button("Load & Verify Model"):
-        with st.spinner(f"Loading {model_name}..."):
-            try:
-                embedder = get_embedder(
-                    model_name, 
-                    layers=st.session_state.config["layers"],
-                    layer_op=st.session_state.config["layer_op"],
-                    lang=st.session_state.config["lang"]
-                )
-                st.success(f"Successfully loaded '{model_name}'!")
-                st.write(f"Vocab Size: {embedder.tokenizer.vocab_size}")
-                st.write(f"Hidden Dimension: {embedder.mlm_model.config.hidden_size}")
-                st.write(f"Configured to use layers {st.session_state.config['layers']} combined via {st.session_state.config['layer_op']}")
-            except Exception as e:
-                st.error(f"Failed to load model: {e}")
+        st.markdown("#### Advanced Model Config")
+        with st.expander("Layer Selection & Combination"):
+            layer_options = {
+                "Last Layer (-1)": -1,
+                "2nd Last Layer (-2)": -2,
+                "3rd Last Layer (-3)": -3,
+                "4th Last Layer (-4)": -4
+            }
+            default_layers = []
+            current_layers = st.session_state.config.get("layers", [-1])
+            for label, val in layer_options.items():
+                if val in current_layers:
+                    default_layers.append(label)
+                    
+            selected_labels = st.multiselect("Layers to Use", list(layer_options.keys()), default=default_layers)
+            st.session_state.config["layers"] = [layer_options[l] for l in selected_labels]
+            
+            combo_options = ["Mean", "Sum", "Concat"]
+            current_op = st.session_state.config.get("layer_op", "mean").title()
+            if current_op not in combo_options: current_op = "Mean"
+            selected_op = st.selectbox("Layer Combination Method", combo_options, index=combo_options.index(current_op))
+            st.session_state.config["layer_op"] = selected_op.lower()
+
+        if st.button("Start Batch Process", type="primary"):
+            save_config(st.session_state.config)
+            
+            # Parse custom words
+            custom_words = []
+            if custom_words_input:
+                raw_words = custom_words_input.replace('\n', ',').split(',')
+                custom_words = [w.strip() for w in raw_words if w.strip()]
+            
+            batch_log = st.empty()
+            b_logs = []
+            def update_batch_logs(text):
+                if not text.startswith('\r') and "%" not in text:
+                    b_logs.append(text)
+                    batch_log.code("".join(b_logs[-20:]))
+
+            pbar = st.progress(0)
+            pbar_text = st.empty()
+            
+            def progress_callback(current, total, desc):
+                if total > 0:
+                    progress = min(current / total, 1.0)
+                    pbar.progress(progress)
+                    pbar_text.text(f"{desc}: {current}/{total} ({int(progress*100)}%)")
+
+            with st.spinner(f"Generating embeddings for {new_model_name}..."):
+                try:
+                    from run_batch_analysis import run_batch_process
+                    
+                    # Note: We always reset specific collections for *this* model
+                    # to ensure fresh start for this specific run.
+                    # Or we could append? For now, let's use the reset flag to be safe for this model.
+                    # But wait, reset deletes collection by name.
+                    # Yes, run_batch_process calculates name from model.
+                    
+                    with capture_stdout(update_batch_logs):
+                        run_batch_process(
+                            db_path_t1=db_t1,
+                            db_path_t2=db_t2,
+                            model_name=new_model_name,
+                            min_freq=min_freq_val,
+                            additional_words=custom_words,
+                            progress_callback=progress_callback,
+                            reset_collections=True 
+                        )
+                    st.success("Batch Processing Complete!")
+                    pbar.progress(1.0)
+                except Exception as e:
+                    st.error(f"Batch process failed: {e}")
+
+    # --- Tab: Manage ---
+    with tab_manage:
+        st.subheader("Existing Embedding Sets")
+        available_models = get_available_models()
+        
+        if not available_models:
+            st.info("No embeddings found in the database.")
+        else:
+            st.write(f"Found {len(available_models)} processed models:")
+            for m in available_models:
+                col_m1, col_m2 = st.columns([3, 1])
+                col_m1.markdown(f"**{m}**")
+                if col_m2.button(f"Delete", key=f"del_{m}"):
+                    try:
+                        from semantic_change.vector_store import VectorStore
+                        v_store = VectorStore(persistence_path="data/chroma_db")
+                        v_store.delete_collection(f"embeddings_t1_{m}")
+                        v_store.delete_collection(f"embeddings_t2_{m}")
+                        st.success(f"Deleted embeddings for {m}")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
 
 
 # --- Page: Corpus Reports ---
@@ -278,7 +413,6 @@ elif page == "Corpus Reports":
         st.error("Please run Ingestion first.")
     else:
         st.write("Compare word frequencies between the two time periods.")
-        
         report_top_n = st.number_input("Top N Shared Words", value=30, min_value=10)
         
         if st.button("Generate Comparison Report"):
@@ -299,13 +433,11 @@ elif page == "Corpus Reports":
                         top_n=report_top_n,
                         output_path=report_path
                     )
-                    
                     st.markdown(markdown_content)
                     st.success(f"Report saved to {report_path}")
                 except Exception as e:
                     st.error(f"Error: {e}")
                     
-        # Check for existing report
         report_path = os.path.join(OUTPUT_DIR, "processing_report.md")
         if os.path.exists(report_path):
             st.markdown("---")
@@ -321,14 +453,67 @@ elif page == "Analysis Dashboard":
     if not dbs_exist:
         st.error("Databases missing. Please go to 'Data Ingestion' first.")
     else:
-        tab_single, tab_batch = st.tabs(["Single Word Analysis", "Batch Analysis"])
+        # Check for available models
+        available_models = get_available_models()
         
-        # --- Single Word Tab ---
-        with tab_single:
+        if not available_models:
+            st.warning("⚠️ No embeddings found. Please go to the **Embeddings & Models** tab to generate them first.")
+        else:
             col1, col2 = st.columns([1, 2])
             
             with col1:
                 st.subheader("Parameters")
+                
+                # Model Selection (Selector instead of Text Input)
+                # Try to find current config model in list
+                current_model_safe = st.session_state.config["model_name"].replace("/", "_").replace("-", "_")
+                
+                # We have a mismatch: available_models are "safe names" (bert_base_uncased), 
+                # but run_single_analysis needs real names (bert-base-uncased).
+                # Since we can't perfectly reverse, we rely on the user to pick the safe name, 
+                # AND we need to pass that safe name to main.py.
+                # BUT main.py expects a real model name to load the tokenizer/model for fallback.
+                # This is tricky.
+                # SOLUTION: For this prototype, we assume the user knows the mapping or we just pass the 
+                # safe name as the "model name". BertEmbedder might fail if we pass "bert_base_uncased" 
+                # to from_pretrained.
+                # Ideally, we should store metadata about the model name in ChromaDB collection metadata 
+                # or a separate config file.
+                # Fallback: In this UI, we just ask the user to type the real model name again if it's not in config?
+                # OR: We rely on the "model_name" stored in config.json.
+                
+                # Let's try to map safe names back if they are common, or just show the safe name 
+                # and assume the user hasn't changed the "Model Name" input field in the other tab.
+                
+                # Better UX: Show the "safe names" in the dropdown. 
+                # When selected, we might not know the exact HuggingFace ID to instantiate the tokenizer.
+                # However, for Visualization (Chroma Neighbors), we DO NOT need the model if we don't do MLM fallback!
+                # But run_single_analysis instantiates BertEmbedder for MLM fallback.
+                # Let's add a text input "HuggingFace ID for Fallback" pre-filled with config?
+                # Or just use the config.
+                
+                selected_safe_model = st.selectbox(
+                    "Select Embedding Set", 
+                    available_models,
+                    index=0 if available_models else None,
+                    help="Select the pre-computed embeddings to use."
+                )
+                
+                # If the user selects a set, we ideally want to update the config's model name
+                # so that the embedder can be loaded. But we don't know the real name.
+                # Let's hope the user hasn't changed the "Embeddings" tab model input.
+                # For now, we will use the text input from the config as the "Real Model Name" 
+                # and just use the selected collection for data.
+                # This relies on the user keeping them in sync.
+                # To make it safer:
+                
+                st.info(f"Using embeddings from: {selected_safe_model}")
+                real_model_name = st.text_input("Confirm Model ID (for Tokenizer)", value=st.session_state.config["model_name"])
+                
+                # Check consistency
+                if real_model_name.replace("/", "_").replace("-", "_") != selected_safe_model:
+                    st.warning("⚠️ Model ID does not match the selected embedding set! Neighbor fallback might fail.")
+
                 target_word = st.text_input("Target Word", value=st.session_state.config["target_word"])
                 
                 # POS Filter
@@ -392,6 +577,10 @@ elif page == "Analysis Dashboard":
 
                 context_window = st.slider("Context Window (chars around word)", min_value=0, max_value=5000, value=st.session_state.config.get("context_window", 0), help="0 means use the sentence from DB. >0 reads raw file around the word.")
 
+                st.markdown("##### Contextual Neighbors (MLM Aggregation)")
+                n_top_sentences = st.number_input("Sentences to sample", min_value=1, max_value=50, value=st.session_state.config.get("n_top_sentences", 10))
+                k_per_sentence = st.number_input("Predictions per sentence", min_value=1, max_value=20, value=st.session_state.config.get("k_per_sentence", 6))
+
                 # Save state
                 st.session_state.config["target_word"] = target_word
                 st.session_state.config["pos_filter"] = pos_filter
@@ -402,6 +591,10 @@ elif page == "Analysis Dashboard":
                 st.session_state.config["wsi_algorithm"] = wsi_algo
                 st.session_state.config["k_neighbors"] = k_neighbors
                 st.session_state.config["context_window"] = context_window
+                st.session_state.config["n_top_sentences"] = n_top_sentences
+                st.session_state.config["k_per_sentence"] = k_per_sentence
+                # Update model name to the one typed in confirmation
+                st.session_state.config["model_name"] = real_model_name
 
                 run_btn = st.button("Run Analysis", type="primary")
 
@@ -427,7 +620,6 @@ elif page == "Analysis Dashboard":
                             lang=st.session_state.config.get("lang", "en")
                         )
                         
-                        # Convert "None" string to actual None
                         clust_red = clustering_reduction if clustering_reduction != "None" else None
 
                         with capture_stdout(update_logs):
@@ -449,7 +641,9 @@ elif page == "Analysis Dashboard":
                                 n_samples=n_samples,
                                 viz_max_instances=st.session_state.config["viz_max_instances"],
                                 embedder=embedder,
-                                context_window=context_window
+                                context_window=context_window,
+                                n_top_sentences=n_top_sentences,
+                                k_per_sentence=k_per_sentence
                             )
                         
                         st.success("Analysis Complete!")
@@ -484,110 +678,3 @@ elif page == "Analysis Dashboard":
                     except Exception as e:
                         st.error(f"Analysis failed: {e}")
                         st.exception(e)
-
-        # --- Batch Analysis Tab ---
-        with tab_batch:
-            st.header("Batch Analysis")
-            st.write("Process all shared nouns with a minimum frequency to pre-compute embeddings.")
-            
-            min_freq_val = st.number_input("Minimum Frequency", min_value=5, value=st.session_state.config.get("min_freq", 25), step=5)
-            st.session_state.config["min_freq"] = min_freq_val
-            
-            custom_words_input = st.text_area("Custom Words (comma or newline separated)", 
-                                              placeholder="e.g. apple, banana, car\nor\napple\nbanana",
-                                              help="Add specific words to the batch processing list, regardless of their frequency rank.")
-            
-            if st.button("Start Batch Process"):
-                save_config(st.session_state.config)
-                
-                # Parse custom words
-                custom_words = []
-                if custom_words_input:
-                    # Replace newlines with commas and split
-                    raw_words = custom_words_input.replace('\n', ',').split(',')
-                    custom_words = [w.strip() for w in raw_words if w.strip()]
-                
-                batch_log = st.empty()
-                b_logs = []
-                def update_batch_logs(text):
-                    if not text.startswith('\r') and "%" not in text:
-                        b_logs.append(text)
-                        batch_log.code("".join(b_logs[-20:]))
-
-                pbar = st.progress(0)
-                pbar_text = st.empty()
-                
-                def progress_callback(current, total, desc):
-                    if total > 0:
-                        progress = min(current / total, 1.0)
-                        pbar.progress(progress)
-                        pbar_text.text(f"{desc}: {current}/{total} ({int(progress*100)}%)")
-
-                with st.spinner("Processing..."):
-                    try:
-                        from run_batch_analysis import run_batch_process
-                        
-                        # Generate safe labels for embedding folders
-                        safe_label_t1 = period_t1_label.replace(" ", "_").replace("/", "_")
-                        safe_label_t2 = period_t2_label.replace(" ", "_").replace("/", "_")
-
-                        with capture_stdout(update_batch_logs):
-                            run_batch_process(
-                                db_path_1800=db_t1,
-                                db_path_1900=db_t2,
-                                output_dir_1800=os.path.join(st.session_state.config["data_dir"], f"embeddings/{safe_label_t1}"),
-                                output_dir_1900=os.path.join(st.session_state.config["data_dir"], f"embeddings/{safe_label_t2}"),
-                                model_name=st.session_state.config["model_name"],
-                                min_freq=min_freq_val,
-                                additional_words=custom_words,
-                                progress_callback=progress_callback
-                            )
-                        st.success("Batch Processing Complete!")
-                        pbar.progress(1.0)
-                    except Exception as e:
-                        st.error(f"Batch process failed: {e}")
-
-            st.markdown("---")
-            st.subheader("Semantic Change Ranking")
-            st.write("Compute the semantic shift (cosine distance) for all words in the database.")
-            
-            if st.button("Calculate Semantic Change"):
-                rank_pbar = st.progress(0)
-                rank_status = st.empty()
-                
-                def rank_progress_callback(current, total, desc):
-                    if total > 0:
-                        progress = min(current / total, 1.0)
-                        rank_pbar.progress(progress)
-                        rank_status.text(f"{desc}: {current}/{total} ({int(progress*100)}%)")
-
-                with st.spinner("Calculating distances..."):
-                    try:
-                        from rank_semantic_change import compute_centroid_shift
-                        import pandas as pd
-                        
-                        output_csv = os.path.join(OUTPUT_DIR, "semantic_change_ranking.csv")
-                        
-                        # Use batch log area for output
-                        batch_log_rank = st.empty()
-                        def update_rank_logs(text):
-                            batch_log_rank.code(text)
-
-                        with capture_stdout(update_rank_logs):
-                             compute_centroid_shift(
-                                 min_freq=min_freq_val, 
-                                 output_file=output_csv, 
-                                 progress_callback=rank_progress_callback,
-                                 model_name=st.session_state.config["model_name"]
-                             )
-                        
-                        rank_pbar.progress(1.0)
-                        if os.path.exists(output_csv):
-                            st.success(f"Ranking saved to {output_csv}")
-                            df = pd.read_csv(output_csv)
-                            st.dataframe(df.head(20))
-                        else:
-                            st.warning("No results generated. Check if the database is populated.")
-                            
-                    except Exception as e:
-                        st.error(f"Ranking failed: {e}")

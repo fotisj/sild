@@ -15,37 +15,29 @@ def get_db_connection(db_path: str):
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
-def get_top_shared_words(db1: str, db2: str, min_freq: int = 25, additional_words: List[str] = None) -> List[str]:
-    print(f"Finding all shared nouns with frequency >= {min_freq}...")
-    conn1 = get_db_connection(db1)
-    conn2 = get_db_connection(db2)
+def get_frequent_words(db_path: str, min_freq: int = 25, pos_filter: str = 'NOUN') -> List[str]:
+    """
+    Finds words in a specific database with frequency >= min_freq.
+    """
+    print(f"Finding nouns in {os.path.basename(db_path)} with frequency >= {min_freq}...")
+    conn = get_db_connection(db_path)
     
-    # We remove the LIMIT and sort logic here, relying on frequency threshold
-    query = f"SELECT lemma, count(*) as c FROM tokens WHERE pos='NOUN' GROUP BY lemma HAVING c >= {min_freq}"
-    
-    top1 = {row[0] for row in conn1.execute(query).fetchall()}
-    top2 = {row[0] for row in conn2.execute(query).fetchall()}
-    
-    conn1.close()
-    conn2.close()
-    
-    shared = list(top1.intersection(top2))
-    
-    # Filter out very short or non-alpha artifacts
-    # Also filter stopwords and likely foreign/garbage tokens
-    print("Filtering vocabulary...")
+    # Check if table exists
     try:
-        import nltk
-        try:
-            english_vocab = set(nltk.corpus.words.words())
-        except LookupError:
-            print("Downloading nltk words...")
-            nltk.download('words')
-            english_vocab = set(nltk.corpus.words.words())
-    except ImportError:
-        print("NLTK not found. Vocabulary filtering will be basic.")
-        english_vocab = None
-
+        query = f"SELECT lemma, count(*) as c FROM tokens WHERE pos='{pos_filter}' GROUP BY lemma HAVING c >= {min_freq}"
+        rows = conn.execute(query).fetchall()
+    except sqlite3.OperationalError as e:
+        print(f"Error querying {db_path}: {e}")
+        return []
+    finally:
+        conn.close()
+    
+    words = {row[0] for row in rows}
+    
+    # Filter vocabulary
+    clean_words = []
+    
+    # Load stop words
     import spacy
     try:
         nlp = spacy.load("en_core_web_sm", disable=['parser', 'ner'])
@@ -53,52 +45,24 @@ def get_top_shared_words(db1: str, db2: str, min_freq: int = 25, additional_word
     except:
         stop_words = set()
 
-    clean_shared = []
-    for w in shared:
-        if len(w) < 3: continue
-        if not w.isalpha(): continue
+    # NLTK filtering removed to support multi-language/historical corpora.
+    # We rely on spaCy's lemmatization and frequency thresholds.
+
+    for w in words:
+        if len(w) < 2: continue # Keep length check minimal
+        # Alpha check might be too strict for some languages (e.g. hyphens)? 
+        # But generally good for "words". Let's keep isalpha for now, or allow hyphens.
+        if not w.replace('-', '').isalpha(): continue 
         if w in stop_words: continue
         
-        # Heuristic: If it's in NLTK words, keep it. 
-        # If not, check if it's common enough or just garbage? 
-        # For now, if we have NLTK, strict filter.
-        if english_vocab and w not in english_vocab:
-            # Maybe it's a plural form not in dict?
-            # spaCy lemmas should be singular.
-            # Allow some exceptions if needed, but for now strict is safer for "mit"/"des".
-            continue
-            
-        clean_shared.append(w)
+        clean_words.append(w)
         
-    print(f"Found {len(clean_shared)} valid shared nouns (filtered from {len(shared)}) with freq >= {min_freq}.")
-    
-    final_words = clean_shared
-    
-    # Add user-defined words if provided
-    if additional_words:
-        print(f"Adding {len(additional_words)} user-defined words.")
-        existing_set = set(final_words)
-        for w in additional_words:
-            w_clean = w.strip().lower()
-            if w_clean and w_clean not in existing_set:
-                final_words.append(w_clean)
-                existing_set.add(w_clean)
-                
-    return final_words
+    print(f"Found {len(clean_words)} valid words in {os.path.basename(db_path)}.")
+    return sorted(list(clean_words))
 
 def collect_sentences_for_words(db_path: str, target_words: List[str], max_samples: int = 500, pos_filter: str = 'NOUN', progress_callback=None) -> List[Dict[str, Any]]:
     """
     Retrieves sentences containing the target words from the SQLite database.
-    
-    Args:
-        db_path: Path to the SQLite database.
-        target_words: List of word lemmas to search for.
-        max_samples: Maximum number of samples to retrieve per word.
-        pos_filter: POS tag to filter by (default 'NOUN').
-        progress_callback: Optional function(current, total, desc) for progress updates.
-        
-    Returns:
-        List of dictionaries: {'id': sent_id, 'text': text, 'targets': [(lemma, start, end), ...]}.
     """
     print(f"Collecting sentences from {db_path} (max_samples={max_samples}, pos={pos_filter})...")
     conn = get_db_connection(db_path)
@@ -116,14 +80,12 @@ def collect_sentences_for_words(db_path: str, target_words: List[str], max_sampl
     def process_rows(rows, word):
         for sent_id, start_char, token_text in rows:
             unique_sentence_ids.add(sent_id)
-            # We now trust start_char as relative offset
             end_char = start_char + len(token_text)
             sentence_tasks[sent_id].append((word, start_char, end_char))
 
     if progress_callback:
         progress_callback(0, total, desc)
         for i, word in enumerate(iterator):
-            # STRICT filtering by POS and Lemma
             query = "SELECT sentence_id, start_char, text FROM tokens WHERE lemma = ? AND pos = ? LIMIT ?"
             rows = cursor.execute(query, (word, pos_filter, max_samples)).fetchall()
             process_rows(rows, word)
@@ -144,7 +106,7 @@ def collect_sentences_for_words(db_path: str, target_words: List[str], max_sampl
     desc = "Fetching texts"
     total_chunks = len(range(0, len(sent_ids_list), chunk_size))
     
-    batch_items = [] # The result list
+    batch_items = [] 
     
     if progress_callback:
         progress_callback(0, total_chunks, desc)
@@ -159,10 +121,7 @@ def collect_sentences_for_words(db_path: str, target_words: List[str], max_sampl
         rows = cursor.execute(f"SELECT id, text FROM sentences WHERE id IN ({placeholders})", chunk).fetchall()
         
         for sid, text in rows:
-            # sentence_tasks[sid] is a list of (lemma, start, end)
-            # Since we have precise offsets, we just pass them through
             targets = sentence_tasks.get(sid, [])
-            
             if targets:
                 batch_items.append({
                     "id": sid,
@@ -183,11 +142,13 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
     """
     batch_items = collect_sentences_for_words(db_path, target_words, max_samples=max_samples, progress_callback=progress_callback)
     total_sents = len(batch_items)
-    chunk_size = 500 # Slightly smaller chunk for DB writes
-    
+    if total_sents == 0:
+        print(f"No sentences found for {os.path.basename(db_path)}.")
+        return
+
+    chunk_size = 500 
     desc = f"Processing {os.path.basename(db_path)} -> ChromaDB: {collection_name}"
     
-    # Helper to add to DB
     def save_chunk(chunk_results):
         if not chunk_results: return
         
@@ -218,67 +179,171 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
                 save_chunk(chunk_results)
                 pbar.update(len(chunk))
 
-def get_collection_name(period: str, model_name: str) -> str:
-    """Generates a consistent collection name based on period and model."""
+def get_collection_name(period_id: str, model_name: str) -> str:
+    """Generates a consistent collection name based on internal period ID (t1/t2) and model."""
     safe_model = model_name.replace("/", "_").replace("-", "_")
-    return f"embeddings_{period}_{safe_model}"
+    return f"embeddings_{period_id}_{safe_model}"
 
 def run_batch_process(
-    db_path_1800="data/corpus_t1.db",
-    db_path_1900="data/corpus_t2.db",
-    output_dir_1800="data/embeddings/1800", # Deprecated but kept for signature compatibility
-    output_dir_1900="data/embeddings/1900", # Deprecated
+
+    db_path_t1="data/corpus_t1.db",
+
+    db_path_t2="data/corpus_t2.db",
+
+    output_dir_t1="data/embeddings/t1", # Deprecated but kept for signature compatibility
+
+    output_dir_t2="data/embeddings/t2", # Deprecated
+
     model_name="bert-base-uncased",
+
     min_freq=25,
+
     max_samples=200,
+
     additional_words: List[str] = None,
-    progress_callback=None
+
+    progress_callback=None,
+
+    # Compatibility with old calls using 1800/1900 args
+
+    db_path_1800=None,
+
+    db_path_1900=None,
+
+    output_dir_1800=None,
+
+    output_dir_1900=None,
+
+    reset_collections: bool = False
+
 ):
+
     """
+
     Entry point for the batch analysis workflow.
-    Identifies shared words and processes both corpora.
+
+    Processes frequent words for each corpus independently using t1/t2 naming.
+
     """
+
+    # Handle legacy args
+
+    if db_path_1800: db_path_t1 = db_path_1800
+
+    if db_path_1900: db_path_t2 = db_path_1900
+
+
+
     start_time = time.time()
+
     
-    # Initialize Vector Store
+
     print("Initializing ChromaDB Vector Store...")
+
     vector_store = VectorStore(persistence_path="data/chroma_db")
+
     
-    shared_words = get_top_shared_words(db_path_1800, db_path_1900, min_freq=min_freq, additional_words=additional_words)
-    
-    # We load the embedder here. 
+
     embedder = BertEmbedder(model_name=model_name)
+
     
-    coll_1800 = get_collection_name("1800", model_name)
-    coll_1900 = get_collection_name("1900", model_name)
+
+    coll_t1 = get_collection_name("t1", model_name)
+
+    coll_t2 = get_collection_name("t2", model_name)
+
+
+
+    if reset_collections:
+
+        print("--- Resetting Collections ---")
+
+        vector_store.delete_collection(coll_t1)
+
+        vector_store.delete_collection(coll_t2)
+
     
-    print(f"\n--- Processing 1800 Corpus (Collection: {coll_1800}) ---")
-    process_corpus(db_path_1800, coll_1800, shared_words, embedder, vector_store, max_samples=max_samples, progress_callback=progress_callback)
+
+    # --- Period 1 ---
+
+    words_t1 = get_frequent_words(db_path_t1, min_freq=min_freq)
+
+    if additional_words:
+
+        words_t1 = sorted(list(set(words_t1 + additional_words)))
+
+        
+
+    print(f"\n--- Processing T1 Corpus (Collection: {coll_t1}) ---")
+
+    process_corpus(db_path_t1, coll_t1, words_t1, embedder, vector_store, max_samples=max_samples, progress_callback=progress_callback)
+
     
-    print(f"\n--- Processing 1900 Corpus (Collection: {coll_1900}) ---")
-    process_corpus(db_path_1900, coll_1900, shared_words, embedder, vector_store, max_samples=max_samples, progress_callback=progress_callback)
+
+    # --- Period 2 ---
+
+    words_t2 = get_frequent_words(db_path_t2, min_freq=min_freq)
+
+    if additional_words:
+
+        words_t2 = sorted(list(set(words_t2 + additional_words)))
+
+
+
+    print(f"\n--- Processing T2 Corpus (Collection: {coll_t2}) ---")
+
+    process_corpus(db_path_t2, coll_t2, words_t2, embedder, vector_store, max_samples=max_samples, progress_callback=progress_callback)
+
     
+
     elapsed_time = time.time() - start_time
+
     print(f"\nAll done! Batch analysis completed in {elapsed_time/60:.2f} minutes.")
 
+
+
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser(description="Run Batch Semantic Change Analysis.")
-    parser.add_argument("--db1800", type=str, default="data/corpus_t1.db", help="Path to 1800 DB")
-    parser.add_argument("--db1900", type=str, default="data/corpus_t2.db", help="Path to 1900 DB")
+
+    parser.add_argument("--db-t1", type=str, default="data/corpus_t1.db", help="Path to Period 1 DB")
+
+    parser.add_argument("--db-t2", type=str, default="data/corpus_t2.db", help="Path to Period 2 DB")
+
     parser.add_argument("--model", type=str, default="bert-base-uncased", help="HuggingFace model name")
-    parser.add_argument("--min-freq", type=int, default=25, help="Minimum frequency for shared nouns")
+
+    parser.add_argument("--min-freq", type=int, default=25, help="Minimum frequency for nouns")
+
     parser.add_argument("--max-samples", type=int, default=200, help="Max samples per word per period")
-    parser.add_argument("--words", type=str, default="", help="Comma-separated list of additional words to process")
+
+    parser.add_argument("--words", type=str, default="", help="Comma-separated list of additional words")
+
+    parser.add_argument("--reset", action="store_true", help="Delete existing collections before processing")
+
     
+
     args = parser.parse_args()
+
     
+
     user_words = [w.strip() for w in args.words.split(',')] if args.words else []
+
     
+
     run_batch_process(
-        db_path_1800=args.db1800, 
-        db_path_1900=args.db1900,
+
+        db_path_t1=args.db_t1, 
+
+        db_path_t2=args.db_t2,
+
         model_name=args.model,
+
         min_freq=args.min_freq,
-        max_samples=50, # Reduced to 50 for speed
-        additional_words=user_words
+
+        max_samples=args.max_samples,
+
+        additional_words=user_words,
+
+        reset_collections=args.reset
+
     )

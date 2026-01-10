@@ -145,18 +145,11 @@ class Visualizer:
     def plot_clustering(self, embeddings: np.ndarray, labels: List[Any],
                         sentences: List[str], title: str = "Clustering",
                         save_path: str = None,
-                        highlight_spans: List[tuple] = None):
+                        highlight_spans: List[tuple] = None,
+                        filenames: List[str] = None):
         """
         Interactive plot of embeddings colored by labels.
         Hovering shows the context sentence with highlighted focus word.
-
-        Args:
-            embeddings: Array of embedding vectors
-            labels: List of labels for coloring
-            sentences: List of sentence strings
-            title: Plot title
-            save_path: Path to save HTML file
-            highlight_spans: Optional list of (start_char, end_char) tuples for highlighting
         """
         import pandas as pd
         if len(embeddings) == 0:
@@ -175,12 +168,17 @@ class Visualizer:
                 wrapped = "<br>".join([s[j:j+80] for j in range(0, len(s), 80)])
             wrapped_sentences.append(wrapped)
 
+        # Prepare filenames
+        if filenames is None:
+            filenames = ["Unknown"] * len(sentences)
+
         # Use DataFrame for robust coloring and hover data
         df = pd.DataFrame({
             'x': coords[:, 0],
             'y': coords[:, 1],
             'Group': [str(l) for l in labels],
-            'Sentence': wrapped_sentences
+            'Sentence': wrapped_sentences,
+            'File': filenames
         })
 
         unique_labels = df['Group'].unique()
@@ -191,12 +189,11 @@ class Visualizer:
             x='x', 
             y='y', 
             color='Group',
-            hover_data={'x': False, 'y': False, 'Group': True, 'Sentence': True},
+            hover_data={'x': False, 'y': False, 'Group': True, 'File': True, 'Sentence': True},
             title=title,
             color_discrete_sequence=px.colors.qualitative.Safe
         )
         
-        # Update traces using specific property names to avoid overwriting the fill color
         fig.update_traces(
             marker_size=12, 
             marker_opacity=0.8, 
@@ -214,17 +211,10 @@ class Visualizer:
     def plot_graph_clustering(self, embeddings: np.ndarray, labels: List[Any],
                               sentences: List[str], title: str = "Graph Clustering",
                               save_path: str = None,
-                              highlight_spans: List[tuple] = None):
+                              highlight_spans: List[tuple] = None,
+                              filenames: List[str] = None):
         """
         Visualizes the embeddings as a force-directed graph (k-NN).
-
-        Args:
-            embeddings: Array of embedding vectors
-            labels: List of labels for coloring
-            sentences: List of sentence strings
-            title: Plot title
-            save_path: Path to save HTML file
-            highlight_spans: Optional list of (start_char, end_char) tuples for highlighting
         """
         import networkx as nx
         from sklearn.neighbors import NearestNeighbors
@@ -235,32 +225,22 @@ class Visualizer:
 
         # 1. Build k-NN Graph
         k = 5
-        # If we have very few points, reduce k
         k = min(k, len(embeddings) - 1)
         if k < 1:
-            # Fallback to simple scatter if not enough points for graph
-            self.plot_clustering(embeddings, labels, sentences, title, save_path, highlight_spans)
+            self.plot_clustering(embeddings, labels, sentences, title, save_path, highlight_spans, filenames)
             return
 
         nbrs = NearestNeighbors(n_neighbors=k+1, algorithm='auto').fit(embeddings)
         distances, indices = nbrs.kneighbors(embeddings)
         
         G = nx.Graph()
-        
-        # Add nodes
+        for i in range(len(embeddings)): G.add_node(i)
         for i in range(len(embeddings)):
-            G.add_node(i)
-            
-        # Add edges
-        for i in range(len(embeddings)):
-            for j in indices[i][1:]: # Skip self (index 0)
+            for j in indices[i][1:]: 
                 G.add_edge(i, j)
                 
-        # 2. Compute Layout
-        # Seed for reproducibility
         pos = nx.spring_layout(G, seed=42, k=1/np.sqrt(len(embeddings)))
         
-        # 3. Prepare Plotly Traces
         edge_x = []
         edge_y = []
         for edge in G.edges():
@@ -275,11 +255,11 @@ class Visualizer:
             hoverinfo='none',
             mode='lines')
 
-        # Prepare Node Data
         node_x = []
         node_y = []
         node_labels = []
         wrapped_sentences = []
+        fnames = []
 
         for i in range(len(embeddings)):
             x, y = pos[i]
@@ -294,19 +274,19 @@ class Visualizer:
             else:
                 wrapped = "<br>".join([s[idx:idx+80] for idx in range(0, len(s), 80)])
             wrapped_sentences.append(wrapped)
+            fnames.append(filenames[i] if filenames and i < len(filenames) else "Unknown")
             
-        # Use DataFrame for simple coloring handling like in plot_clustering
         df = pd.DataFrame({
             'x': node_x,
             'y': node_y,
             'Group': node_labels,
-            'Sentence': wrapped_sentences
+            'Sentence': wrapped_sentences,
+            'File': fnames
         })
 
-        # We create the scatter plot using px for easy color mapping, then combine with edges
         fig_nodes = px.scatter(
             df, x='x', y='y', color='Group',
-            hover_data={'x': False, 'y': False, 'Group': True, 'Sentence': True},
+            hover_data={'x': False, 'y': False, 'Group': True, 'File': True, 'Sentence': True},
             color_discrete_sequence=px.colors.qualitative.Safe
         )
         
@@ -317,9 +297,7 @@ class Visualizer:
             marker_line_color='DarkSlateGrey'
         )
 
-        # Create final figure combining edges and nodes
         fig = go.Figure(data=[edge_trace] + list(fig_nodes.data))
-        
         fig.update_layout(
             title=title,
             template="plotly_white",
@@ -338,18 +316,10 @@ class Visualizer:
                                   sense_labels: List[Any], time_labels: List[str],
                                   sentences: List[str], title: str = "Sense × Time",
                                   save_path: str = None,
-                                  highlight_spans: List[tuple] = None):
+                                  highlight_spans: List[tuple] = None,
+                                  filenames: List[str] = None):
         """
         Combined visualization showing both sense clusters (hue) and time periods (lightness).
-
-        Args:
-            embeddings: Array of embedding vectors
-            sense_labels: Cluster labels for each point
-            time_labels: Time period labels (e.g., "1800", "1900")
-            sentences: List of sentence strings
-            title: Plot title
-            save_path: Path to save HTML file
-            highlight_spans: Optional list of (start_char, end_char) tuples for highlighting
         """
         import pandas as pd
         import colorsys
@@ -360,7 +330,7 @@ class Visualizer:
 
         coords = self._reduce_dim(embeddings)
 
-        # Define base hues for sense clusters (up to 8 distinct colors)
+        # Define base hues for sense clusters
         base_colors_hsv = [
             (0.58, 0.70, 0.85),   # Blue
             (0.08, 0.75, 0.90),   # Orange
@@ -372,23 +342,18 @@ class Visualizer:
             (0.12, 0.60, 0.75),   # Brown/Gold
         ]
 
-        # Get unique values
         unique_senses = sorted(list(set(sense_labels)))
         unique_times = sorted(list(set(time_labels)))
 
-        # Create lightness multipliers for time periods (older = lighter, newer = darker)
-        # For 2 periods: [1.3, 0.7], for 3: [1.4, 1.0, 0.6]
         n_times = len(unique_times)
         if n_times == 2:
             lightness_multipliers = {unique_times[0]: 1.35, unique_times[1]: 0.75}
         elif n_times == 3:
             lightness_multipliers = {unique_times[0]: 1.4, unique_times[1]: 1.0, unique_times[2]: 0.65}
         else:
-            # Fallback: linear interpolation
             lightness_multipliers = {t: 1.4 - (i * 0.7 / max(n_times - 1, 1))
                                      for i, t in enumerate(unique_times)}
 
-        # Build color map: (sense, time) -> hex color
         def hsv_to_hex(h, s, v):
             r, g, b = colorsys.hsv_to_rgb(h, s, v)
             return f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
@@ -398,19 +363,19 @@ class Visualizer:
             base_h, base_s, base_v = base_colors_hsv[sense_idx % len(base_colors_hsv)]
             for time in unique_times:
                 mult = lightness_multipliers[time]
-                # Adjust value (brightness) based on time period
                 adjusted_v = min(1.0, max(0.3, base_v * mult))
-                # Also slightly adjust saturation (lighter = less saturated)
                 adjusted_s = min(1.0, max(0.2, base_s * (0.7 + 0.3 / mult)))
                 color_map[(str(sense), time)] = hsv_to_hex(base_h, adjusted_s, adjusted_v)
 
-        # Build data
         wrapped_sentences = []
         colors = []
         combined_labels = []
+        fnames = []
+
+        if filenames is None:
+            filenames = ["Unknown"] * len(sentences)
 
         for i, s in enumerate(sentences):
-            # Wrap sentence with highlighting
             if highlight_spans and i < len(highlight_spans) and highlight_spans[i]:
                 start, end = highlight_spans[i]
                 wrapped = _highlight_word_in_sentence(s, start, end)
@@ -422,6 +387,7 @@ class Visualizer:
             time = time_labels[i]
             colors.append(color_map[(sense, time)])
             combined_labels.append(f"Cluster {sense} ({time})")
+            fnames.append(filenames[i])
 
         df = pd.DataFrame({
             'x': coords[:, 0],
@@ -430,13 +396,12 @@ class Visualizer:
             'Label': combined_labels,
             'Sense': [str(s) for s in sense_labels],
             'Time': time_labels,
-            'Sentence': wrapped_sentences
+            'Sentence': wrapped_sentences,
+            'File': fnames
         })
 
-        # Create scatter plot with explicit colors
         fig = go.Figure()
 
-        # Add traces grouped by combined label for legend
         for sense in unique_senses:
             for time in unique_times:
                 mask = (df['Sense'] == str(sense)) & (df['Time'] == time)
@@ -456,11 +421,12 @@ class Visualizer:
                         opacity=0.85,
                         line=dict(width=1, color='DarkSlateGrey')
                     ),
-                    customdata=subset[['Sense', 'Time', 'Sentence']].values,
+                    customdata=subset[['Sense', 'Time', 'File', 'Sentence']].values,
                     hovertemplate=(
                         "<b>Cluster:</b> %{customdata[0]}<br>"
                         "<b>Period:</b> %{customdata[1]}<br>"
-                        "<b>Sentence:</b><br>%{customdata[2]}"
+                        "<b>File:</b> %{customdata[2]}<br>"
+                        "<b>Sentence:</b><br>%{customdata[3]}"
                         "<extra></extra>"
                     )
                 ))

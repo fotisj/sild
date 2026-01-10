@@ -73,19 +73,7 @@ class BertEmbedder(Embedder):
             print("Warning: spaCy model 'en_core_web_lg' not found. Neighbor filtering might be limited.")
             self.filter_nlp = None
 
-        # Load NLTK English word list for validating real words
-        self.english_words = None
-        try:
-            import nltk
-            try:
-                self.english_words = set(w.lower() for w in nltk.corpus.words.words())
-                print(f"Loaded NLTK word list with {len(self.english_words)} words")
-            except LookupError:
-                print("Downloading NLTK words corpus...")
-                nltk.download('words')
-                self.english_words = set(w.lower() for w in nltk.corpus.words.words())
-        except ImportError:
-            print("Warning: NLTK not available. Word validation will be limited.")
+        # NLTK removed to support multi-language/historical corpora
 
     def _combine_layers(self, trf_data) -> torch.Tensor:
         """
@@ -304,13 +292,8 @@ class BertEmbedder(Embedder):
                 if not is_word_start:
                     continue
 
-                # 2. Validate against English dictionary (most reliable filter)
+                # 3. Filter Stopwords (still useful for general noise)
                 token_lower = token_str.lower()
-                if self.english_words:
-                    if token_lower not in self.english_words:
-                        continue
-
-                # 3. Filter Stopwords
                 if self.filter_nlp and token_lower in self.filter_nlp.Defaults.stop_words:
                     continue
 
