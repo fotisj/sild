@@ -4,15 +4,19 @@ This toolkit provides a comprehensive pipeline for analyzing semantic change of 
 
 ## Workflow Overview
 
-The analysis process is divided into two main stages:
+The analysis process is divided into three main stages:
 
-1.  **Data Ingestion (Model-Agnostic):** Raw text corpora from different time periods are processed into a structured format (SQLite database). This step involves tokenization and lemmatization. **This only needs to be run once per corpus.** The generated databases are independent of any specific embedding model.
+1.  **Data Ingestion (Model-Agnostic):** Raw text corpora from different time periods are processed into a structured format (SQLite database). This step involves tokenization and lemmatization. **This only needs to be run once per corpus.**
 
-2.  **Analysis (Model-Specific):** This is where you use the GUI or scripts to analyze words.
+2.  **Batch Embedding & Ranking (Model-Specific):** 
     -   The system queries sentences from the ingested databases.
-    -   It then loads your chosen Transformer model (e.g., `bert-base-uncased`, `answerdotai/ModernBERT-base`) on the fly.
-    -   Embeddings are generated at this stage using the selected model.
-    -   Finally, clustering (WSI) and visualization are performed.
+    -   It generates embeddings for frequent words using your chosen Transformer model.
+    -   It then **ranks** these words by their semantic shift (cosine distance) to help you find interesting cases.
+
+3.  **Detailed Analysis (Visualization):** 
+    -   You select a specific word (e.g., one with a high shift score).
+    -   The system clusters its embeddings to find distinct senses (WSI).
+    -   Visualizations show how these senses evolve over time.
 
 > **Key Takeaway:** You can experiment with different models (e.g., BERT, RoBERTa) on the same ingested data without ever needing to re-ingest the corpus.
 
@@ -88,12 +92,20 @@ This will launch a web interface (usually at `http://localhost:8501`) where you 
 
 You can also run analyses directly from the command line:
 
-**Single Word Analysis:**
+**Step 1: Batch Embedding Generation**
+Pre-compute embeddings for frequent words.
 ```bash
-python main.py --word factory --model bert-base-uncased
+python -m src.semantic_change.embeddings_generation --model bert-base-uncased --max-samples 200
 ```
 
-**Batch Analysis:**
+**Step 2: Rank Semantic Change**
+Calculate the shift for all shared words to find the most interesting ones.
 ```bash
-python run_batch_analysis.py --model roberta-base --limit 1000
+python src/rank_semantic_change.py --output output/ranking.csv
+```
+
+**Step 3: Single Word Analysis**
+Deep dive into a specific word.
+```bash
+python main.py --word factory --model bert-base-uncased
 ```

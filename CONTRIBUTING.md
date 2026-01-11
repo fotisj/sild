@@ -30,10 +30,12 @@ Thank you for your interest in contributing! This project aims to provide a robu
 
 ## Project Structure
 
--   `gui.py`: The main entry point for the Streamlit interface.
--   `main.py`: Core logic for single-word analysis.
--   `run_batch_analysis.py`: Logic for batch processing.
--   `semantic_change/`: Package containing the core modules:
+-   `gui.py`: Wrapper script to launch the Streamlit interface.
+-   `src/gui_app.py`: Main logic for the Streamlit dashboard.
+-   `src/main.py`: Core logic for single-word analysis.
+-   `src/semantic_change/embeddings_generation.py`: Script for batch embedding generation (formerly `run_batch_analysis.py`).
+-   `src/rank_semantic_change.py`: Script for ranking words by semantic shift.
+-   `src/semantic_change/`: Package containing the core modules:
     -   `corpus.py`: SQLite-backed corpus management.
     -   `embedding.py`: BERT/Transformer embedding generation.
     -   `wsi.py`: Word Sense Induction algorithms (Clustering).

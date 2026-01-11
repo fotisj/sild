@@ -16,7 +16,7 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
           v                           v
 +---------------------------------------------------+
 |                 Ingestion (Stage 1)               |
-|           (src/semantic_change/ingestor.py)       |
+|           (src/run_ingest.py)                     |
 |                                                   |
 | 1. Tokenization & Sentence Splitting              |
 | 2. Lemmatization & POS Tagging                    |
@@ -36,8 +36,8 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
                           |
                           v
 +---------------------------------------------------+
-|              Batch Analysis (Stage 2)             |
-|             (src/run_batch_analysis.py)           |
+|             Batch Embedding (Stage 2)             |
+|    (src/semantic_change/embeddings_generation.py) |
 |                                                   |
 | 1. Extract Frequent Vocabulary (per corpus)       |
 | 2. Retrieve Sentences for each word               |
@@ -61,6 +61,17 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
                           |
                           v
 +---------------------------------------------------+
+|           Semantic Change Ranking (Stage 3)       |
+|             (src/rank_semantic_change.py)         |
+|                                                   |
+| 1. Retrieve Embeddings for Shared Vocabulary      |
+| 2. Compute Centroids per Period                   |
+| 3. Calculate Cosine Distance (Shift)              |
+| 4. Output Ranked CSV (output/ranking.csv)         |
++-------------------------+-------------------------+
+                          |
+                          v
++---------------------------------------------------+
 |             Analysis & Visualization              |
 |                  (src/main.py)                    |
 |                                                   |
@@ -74,12 +85,12 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
 
 ## Component Details
 
-### 1. Ingestion (`src/semantic_change/ingestor.py`)
+### 1. Ingestion (`src/run_ingest.py`)
 - **Purpose**: Converts raw unstructured text into a queryable structure.
 - **Key Feature**: Uses `spacy` (GPU-accelerated if available) for robust linguistic annotation.
 - **Output**: SQLite databases that allow fast retrieval of all sentences containing a specific lemma.
 
-### 2. Batch Embedding (`src/run_batch_analysis.py`)
+### 2. Batch Embedding (`src/semantic_change/embeddings_generation.py`)
 - **Purpose**: Pre-computes context-aware embeddings for the entire relevant vocabulary.
 - **Strategy**: 
     - Identifies all Nouns/Verbs/Adjectives with frequency > `min_freq` in each corpus independently.
@@ -87,7 +98,12 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
     - Computes embeddings using the specified HuggingFace model.
 - **Storage**: Saves embeddings to ChromaDB, enabling semantic search (Nearest Neighbors) later.
 
-### 3. Analysis Core (`src/main.py`)
+### 3. Semantic Change Ranking (`src/rank_semantic_change.py`)
+- **Purpose**: Quantifies the degree of semantic change for all shared words.
+- **Method**: Calculates the cosine distance between the centroid of a word's embeddings in T1 and its centroid in T2.
+- **Output**: A CSV file listing words sorted by their semantic shift score, helping users identify interesting candidates for deep analysis.
+
+### 4. Analysis Core (`src/main.py`)
 - **Purpose**: Performs the actual Word Sense Induction (WSI).
 - **Process**:
     - Fetches embeddings for the target word from ChromaDB.
@@ -106,15 +122,17 @@ project_root/
 ├── data_source/            # Input Raw Text
 │   ├── t1/                 # Text files for Period 1
 │   └── t2/                 # Text files for Period 2
-├── output/                 # Visualization HTMLs
+├── output/                 # Visualization HTMLs & Reports
 └── src/                    # Source Code
     ├── gui_app.py          # Streamlit Dashboard
-    ├── main.py             # Analysis Logic
-    ├── run_batch_analysis.py # Embedding Generation
+    ├── main.py             # Analysis Logic (Single Word)
+    ├── rank_semantic_change.py # Semantic Shift Ranking
     ├── run_ingest.py       # Corpus Ingestion
     └── semantic_change/    # Core Modules
+        ├── computing_semantic_change.py # Shared logic for distance calc
         ├── corpus.py       # DB Interface
         ├── embedding.py    # LLM Wrapper
+        ├── embeddings_generation.py # Batch Embedding Script
         ├── ingestor.py     # Spacy Processing
         ├── vector_store.py # ChromaDB Wrapper
         └── visualization.py # Plotly Charts

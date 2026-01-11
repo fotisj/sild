@@ -1,0 +1,5 @@
+from src.semantic_change.embedding import BertEmbedder
+print('Starting...')
+embedder = BertEmbedder(model_name='LSX-UniWue/ModernGBERT_1B')
+print('Done!')
+  "

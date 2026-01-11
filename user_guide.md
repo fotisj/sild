@@ -14,7 +14,7 @@ Before you can run any analysis, you need text data.
     python run_ingest.py --input-dir-1800 my_data/corpus_1800 --input-dir-1900 my_data/corpus_1900
     ```
     *   This process may take some time depending on the size of your data.
-    *   It creates `ingested_1800.db` and `ingested_1900.db` in the `data/` folder.
+    *   It creates `corpus_1800.db` and `corpus_1900.db` in the `data/` folder.
 
 ## 2. Using the GUI
 
@@ -27,7 +27,7 @@ uv run streamlit run gui.py
 *   **Data Directory:** Point this to where your `.db` files are (default is `data`).
 *   **Embedding Model:** Enter the name of a Hugging Face model (e.g., `bert-base-uncased`, `roberta-base`, `answerdotai/ModernBERT-base`). The first time you use a new model, it will be downloaded automatically.
 
-### Tab 1: Focus Word Analysis (Single Word)
+### Tab 1: Analysis Dashboard (Single Word)
 This is for deep-diving into a specific word.
 
 1.  **Target Word:** Enter the word you want to study (e.g., "cell").
@@ -46,16 +46,40 @@ This is for deep-diving into a specific word.
 *   **Sense Clusters:** Shows usages colored by their "sense" (meaning). Hover over points to read the sentence.
 *   **Semantic Neighbors:** Shows the "centroid" (average meaning) of a cluster and its closest words in the vocabulary. This helps you label the sense (e.g., "prison", "biology" for the word "cell").
 
-### Tab 2: Batch Analysis
+### Tab 2: Embeddings & Models (Batch Analysis)
 Use this to process *all* shared nouns between the two periods.
 
-1.  **Word Limit:** How many top frequent words to process (e.g., 2000).
-2.  **Run Batch Process:** This will compute embeddings for all these words and save them to disk. This is useful for quantitative analysis later (e.g., ranking words by degree of semantic change).
+1.  **Generate Embeddings:** Select a model and set criteria (e.g., Min Frequency).
+2.  **Start Batch Process:** This will compute embeddings for all frequent words and save them to disk. This is **required** before you can see semantic change scores in the Corpus Reports.
 
-### Tab 3: Corpus Statistics
-1.  **Generate Report:** Click this to see a table comparing word frequencies between the two time periods. This helps identify words that have become more or less common.
+### Tab 3: Corpus Reports
+1.  **Generate Comparison Report:** Click this to see a table comparing word frequencies between the two time periods.
+2.  **Semantic Change:** If you have run the Batch Analysis (Tab 2), this report will also show the "Semantic Change" score (Cosine Distance) for each word, allowing you to easily spot which words have shifted the most.
 
-## 3. Advanced Tips
+## 3. Command-Line Workflow
+
+You can run the full pipeline from the terminal.
+
+### Step 1: Batch Embedding
+Generate embeddings for all frequent words.
+```bash
+python -m src.semantic_change.embeddings_generation --model bert-base-uncased --max-samples 200
+```
+
+### Step 2: Semantic Change Ranking
+Calculate the shift for all shared words to find the most interesting ones.
+```bash
+python src/rank_semantic_change.py --output output/ranking.csv
+```
+Open `output/ranking.csv` to see the words with the highest distance scores.
+
+### Step 3: Single Word Analysis
+Deep dive into a specific word (e.g., "factory").
+```bash
+python main.py --word factory --model bert-base-uncased
+```
+
+## 4. Advanced Tips
 
 *   **Model Choice:** `bert-base-uncased` is a standard baseline. `roberta-base` often performs better. Newer models like `ModernBERT` can be very efficient.
 *   **Performance:** If the app is slow, try reducing "Samples per Period".

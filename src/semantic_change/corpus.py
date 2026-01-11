@@ -3,6 +3,26 @@ import random
 import sqlite3
 from typing import List, Dict, Optional, Any, Tuple
 
+
+def get_db_metadata(db_path: str, key: str) -> Optional[str]:
+    """Reads a metadata value directly from a database file."""
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM metadata WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def get_spacy_model_from_db(db_path: str) -> Optional[str]:
+    """Returns the spaCy model name used during ingestion of a database."""
+    return get_db_metadata(db_path, "spacy_model")
+
 class Corpus:
     """Represents a single corpus (e.g., a specific time period) backed by a SQLite database."""
     
@@ -28,7 +48,7 @@ class Corpus:
         """Returns basic statistics about the corpus from the DB."""
         if not self.conn:
             return {}
-        
+
         cursor = self.conn.cursor()
         stats = {}
         try:
@@ -41,6 +61,23 @@ class Corpus:
         except sqlite3.Error:
             pass
         return stats
+
+    def get_metadata(self, key: str) -> Optional[str]:
+        """Returns a metadata value from the database."""
+        if not self.conn:
+            return None
+
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("SELECT value FROM metadata WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except sqlite3.Error:
+            return None
+
+    def get_spacy_model(self) -> Optional[str]:
+        """Returns the spaCy model name used during ingestion."""
+        return self.get_metadata("spacy_model")
 
     def get_top_lemmas(self, pos: str = 'NOUN', limit: int = 2000) -> List[Tuple[str, int]]:
         """Returns the top frequent lemmas for a given POS tag."""

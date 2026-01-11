@@ -4,6 +4,10 @@ Semantic Change Analysis - Streamlit GUI
 This module provides the web interface for the semantic change analysis toolkit.
 View logic is separated from business logic through small, focused functions.
 """
+import warnings
+# Suppress Streamlit's ScriptRunContext warning (harmless, occurs during background processing)
+warnings.filterwarnings("ignore", message=".*missing ScriptRunContext.*")
+
 import streamlit as st
 import os
 import sys
@@ -11,6 +15,7 @@ import contextlib
 import json
 import glob
 import time
+import traceback
 
 # Ensure module path is available
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +41,8 @@ def get_default_config() -> dict:
         "input_dir_t2": "data_gutenberg/1900",
         "period_t1_label": "1800",
         "period_t2_label": "1900",
+        "file_encoding": "utf-8",
+        "max_files": None,
         "spacy_model": "en_core_web_sm",
         "model_name": "bert-base-uncased",
         "target_word": "current",
@@ -85,8 +92,8 @@ def save_config(config: dict) -> None:
 # =============================================================================
 
 @contextlib.contextmanager
-def capture_stdout(output_func):
-    """Captures stdout and sends it to an output function."""
+def capture_output(output_func):
+    """Captures stdout and stderr, sends them to an output function."""
     class StreamlitWriter:
         def write(self, text):
             output_func(text)
@@ -94,11 +101,15 @@ def capture_stdout(output_func):
             pass
 
     old_stdout = sys.stdout
-    sys.stdout = StreamlitWriter()
+    old_stderr = sys.stderr
+    writer = StreamlitWriter()
+    sys.stdout = writer
+    sys.stderr = writer
     try:
         yield
     finally:
         sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
 
 def get_db_paths(config: dict) -> tuple[str, str]:
@@ -124,10 +135,10 @@ def get_available_models() -> list[str]:
 
 
 @st.cache_resource
-def get_embedder(model_name: str, layers=None, layer_op: str = "mean", lang: str = "en"):
+def get_embedder(model_name: str, layers=None, layer_op: str = "mean", lang: str = "en", filter_model: str = None):
     """Loads and caches the BERT Embedder model."""
     from semantic_change.embedding import BertEmbedder
-    return BertEmbedder(model_name=model_name, layers=layers, layer_op=layer_op, lang=lang)
+    return BertEmbedder(model_name=model_name, layers=layers, layer_op=layer_op, lang=lang, filter_model=filter_model)
 
 
 # =============================================================================
@@ -200,14 +211,141 @@ def render_ingestion_inputs(config: dict, period_t1_label: str, period_t2_label:
     return input_t1, input_t2
 
 
-def render_spacy_selector(config: dict) -> str:
-    """Renders SpaCy model selector."""
-    st.markdown("### Settings")
-    spacy_model = st.selectbox(
-        "SpaCy Model (Lemmatization)",
-        ["en_core_web_sm", "en_core_web_md", "en_core_web_lg"],
-        index=0,
+def check_spacy_transformer_deps(model_name: str) -> tuple[bool, str]:
+    """
+    Check if transformer model dependencies are installed.
+    Returns (ready, message) - ready=True means we can proceed.
+    """
+    import subprocess
+    import sys
+
+    needs_restart = False
+    messages = []
+
+    # Check if this is a transformer model
+    if not model_name.endswith("_trf"):
+        return True, ""
+
+    # Check if spacy-curated-transformers is installed
+    try:
+        import spacy_curated_transformers
+    except ImportError:
+        messages.append("Installing spacy-curated-transformers...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "spacy-curated-transformers"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return False, f"Failed to install spacy-curated-transformers: {result.stderr}"
+        needs_restart = True
+
+    # Check if the model is downloaded
+    try:
+        import spacy
+        spacy.util.get_package_path(model_name)
+    except (ImportError, Exception):
+        messages.append(f"Downloading spaCy model: {model_name}...")
+        result = subprocess.run(
+            [sys.executable, "-m", "spacy", "download", model_name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return False, f"Failed to download model {model_name}: {result.stderr}"
+        needs_restart = True
+
+    if needs_restart:
+        return False, "Dependencies installed. Please restart the app to use transformer models."
+
+    return True, ""
+
+
+def render_max_files_selector(config: dict) -> int | None:
+    """Renders max files selector for testing."""
+    use_limit = st.checkbox(
+        "Limit files (for testing)",
+        value=config.get("max_files") is not None,
+        help="Process only a random subset of files for faster testing"
     )
+
+    if use_limit:
+        max_files = st.number_input(
+            "Max files per period",
+            min_value=1,
+            max_value=1000,
+            value=config.get("max_files") or 25,
+            step=5,
+        )
+        config["max_files"] = max_files
+        return max_files
+    else:
+        config["max_files"] = None
+        return None
+
+
+def render_encoding_selector(config: dict) -> str:
+    """Renders file encoding selector."""
+    encodings = [
+        ("UTF-8", "utf-8"),
+        ("Windows/ANSI (CP1252)", "cp1252"),
+        ("Latin-1 (ISO-8859-1)", "latin-1"),
+        ("Other", "other"),
+    ]
+    encoding_labels = [e[0] for e in encodings]
+    encoding_values = [e[1] for e in encodings]
+
+    current_encoding = config.get("file_encoding", "utf-8")
+    if current_encoding in encoding_values:
+        default_index = encoding_values.index(current_encoding)
+    else:
+        default_index = encoding_labels.index("Other")
+
+    selected_label = st.selectbox("File Encoding", encoding_labels, index=default_index)
+    selected_value = encoding_values[encoding_labels.index(selected_label)]
+
+    if selected_value == "other":
+        file_encoding = st.text_input(
+            "Custom Encoding",
+            value=current_encoding if current_encoding not in encoding_values else "",
+            help="e.g., cp850, iso-8859-15, utf-16",
+        )
+    else:
+        file_encoding = selected_value
+
+    config["file_encoding"] = file_encoding
+    return file_encoding
+
+
+def render_spacy_selector(config: dict) -> str:
+    """Renders SpaCy model selector with custom model support."""
+    st.markdown("### Settings")
+    common_models = [
+        "en_core_web_sm",
+        "en_core_web_md",
+        "en_core_web_lg",
+        "en_core_web_trf",
+        "Other (Custom)",
+    ]
+
+    current_model = config.get("spacy_model", "en_core_web_sm")
+    default_index = common_models.index(current_model) if current_model in common_models[:-1] else common_models.index("Other (Custom)")
+
+    selected = st.selectbox("SpaCy Model (Lemmatization)", common_models, index=default_index)
+
+    if selected == "Other (Custom)":
+        spacy_model = st.text_input(
+            "SpaCy Model Name",
+            value=current_model if current_model not in common_models[:-1] else "",
+            help="e.g. de_core_news_sm, es_core_news_md, or any spaCy model name",
+        )
+    else:
+        spacy_model = selected
+
+    # Show warning for transformer models
+    if spacy_model.endswith("_trf"):
+        st.info("Transformer models require additional dependencies. They will be installed automatically if needed.")
+
     config["spacy_model"] = spacy_model
     return spacy_model
 
@@ -216,7 +354,9 @@ def run_ingestion_process(
     input_t1: str, input_t2: str,
     db_t1: str, db_t2: str,
     period_t1_label: str, period_t2_label: str,
-    spacy_model: str
+    spacy_model: str,
+    file_encoding: str = "utf-8",
+    max_files: int | None = None
 ) -> None:
     """Executes the ingestion process with progress tracking."""
     log_container = st.empty()
@@ -238,7 +378,7 @@ def run_ingestion_process(
     with st.spinner("Ingesting corpora... This may take a while."):
         try:
             from run_ingest import run_ingestion
-            with capture_stdout(update_log):
+            with capture_output(update_log):
                 run_ingestion(
                     input_t1=input_t1,
                     input_t2=input_t2,
@@ -247,6 +387,8 @@ def run_ingestion_process(
                     label_t1=period_t1_label,
                     label_t2=period_t2_label,
                     spacy_model=spacy_model,
+                    file_encoding=file_encoding,
+                    max_files=max_files,
                     progress_callback=progress_callback,
                 )
 
@@ -264,14 +406,23 @@ def render_danger_zone(db_t1: str, db_t2: str) -> None:
     st.subheader("🗑️ Danger Zone")
     st.warning("These actions will delete processed data.")
 
+    # Display feedback from previous deletion (persisted across rerun)
+    if "db_delete_message" in st.session_state:
+        msg_type, msg_text = st.session_state.db_delete_message
+        if msg_type == "success":
+            st.success(msg_text)
+        else:
+            st.error(msg_text)
+        del st.session_state.db_delete_message
+
     if st.button("Wipe SQLite Databases", help="Deletes the corpus_t1.db and corpus_t2.db files."):
         from run_ingest import delete_databases
         success, message = delete_databases(db_t1, db_t2)
         if success:
-            st.success(message)
-            st.rerun()
+            st.session_state.db_delete_message = ("success", message)
         else:
-            st.error(f"Failed to delete databases: {message}")
+            st.session_state.db_delete_message = ("error", f"Failed to delete databases: {message}")
+        st.rerun()
 
 
 def render_ingestion_page(config: dict, db_t1: str, db_t2: str, period_t1_label: str, period_t2_label: str) -> None:
@@ -283,16 +434,40 @@ def render_ingestion_page(config: dict, db_t1: str, db_t2: str, period_t1_label:
     """)
 
     input_t1, input_t2 = render_ingestion_inputs(config, period_t1_label, period_t2_label)
+    file_encoding = render_encoding_selector(config)
+    max_files = render_max_files_selector(config)
     spacy_model = render_spacy_selector(config)
 
     st.info(f"Output files will be saved to: `{db_t1}` and `{db_t2}`")
+
+    # Check if restart is needed (from previous dependency installation)
+    if st.session_state.get("spacy_restart_needed"):
+        st.warning("Dependencies were installed. Please restart the app to use transformer models.")
+        if st.button("Restart App", type="primary"):
+            st.session_state.spacy_restart_needed = False
+            st.rerun()
+        return
 
     if st.button("Run Ingestion Process", type="primary"):
         save_config(config)
         if not os.path.exists(input_t1) or not os.path.exists(input_t2):
             st.error("One or both input directories do not exist.")
-        else:
-            run_ingestion_process(input_t1, input_t2, db_t1, db_t2, period_t1_label, period_t2_label, spacy_model)
+            return
+
+        # Check transformer dependencies before running
+        with st.spinner("Checking dependencies..."):
+            ready, message = check_spacy_transformer_deps(spacy_model)
+
+        if not ready:
+            if "restart" in message.lower():
+                st.session_state.spacy_restart_needed = True
+                st.warning(message)
+                st.rerun()
+            else:
+                st.error(message)
+            return
+
+        run_ingestion_process(input_t1, input_t2, db_t1, db_t2, period_t1_label, period_t2_label, spacy_model, file_encoding, max_files)
 
     render_danger_zone(db_t1, db_t2)
 
@@ -313,12 +488,15 @@ def render_model_selector(config: dict) -> str:
     ]
 
     current_model = config["model_name"]
-    default_index = common_models.index(current_model) if current_model in common_models else common_models.index("Other (Custom)")
+    # Use common_models[:-1] to exclude "Other (Custom)" from the check
+    default_index = common_models.index(current_model) if current_model in common_models[:-1] else common_models.index("Other (Custom)")
 
-    selected = st.selectbox("Select Model", common_models, index=default_index)
+    selected = st.selectbox("Select Model", common_models, index=default_index, key="embedding_model_selector")
 
     if selected == "Other (Custom)":
-        return st.text_input("Hugging Face Model ID", value=current_model, help="e.g. bert-large-uncased")
+        # Pre-fill with current model if it's a custom one, otherwise empty
+        prefill = current_model if current_model not in common_models[:-1] else ""
+        return st.text_input("Hugging Face Model ID", value=prefill, help="e.g. bert-large-uncased")
     return selected
 
 
@@ -350,43 +528,49 @@ def render_layer_config(config: dict) -> None:
 def run_batch_embedding_process(
     db_t1: str, db_t2: str,
     model_name: str, min_freq: int,
-    custom_words: list[str]
+    custom_words: list[str],
+    test_mode: bool = False,
+    max_samples: int = 200
 ) -> None:
     """Executes the batch embedding generation process."""
-    batch_log = st.empty()
+    status_container = st.empty()
+    status_container.info(f"Starting embedding generation for {model_name}...")
+    
+    log_container = st.empty()
     logs = []
 
     def update_log(text):
-        if not text.startswith("\r") and "%" not in text:
-            logs.append(text)
-            batch_log.code("".join(logs[-20:]))
+        logs.append(text)
+        # Keep only last 30 lines to avoid UI lag
+        log_container.code("".join(logs[-30:]))
 
     pbar = st.progress(0)
-    pbar_text = st.empty()
+    status_text = st.empty()
 
     def progress_callback(current, total, desc):
         if total > 0:
-            progress = min(current / total, 1.0)
-            pbar.progress(progress)
-            pbar_text.text(f"{desc}: {current}/{total} ({int(progress * 100)}%)")
+            pbar.progress(min(current / total, 1.0))
+            status_text.text(f"{desc} ({current}/{total})")
 
-    with st.spinner(f"Generating embeddings for {model_name}..."):
-        try:
-            from semantic_change.embeddings_generation import run_batch_generation
-            with capture_stdout(update_log):
-                run_batch_generation(
-                    db_path_t1=db_t1,
-                    db_path_t2=db_t2,
-                    model_name=model_name,
-                    min_freq=min_freq,
-                    additional_words=custom_words,
-                    progress_callback=progress_callback,
-                    reset_collections=True,
-                )
-            st.success("Batch Processing Complete!")
-            pbar.progress(1.0)
-        except Exception as e:
-            st.error(f"Batch process failed: {e}")
+    try:
+        from semantic_change.embeddings_generation import run_batch_generation
+        
+        with capture_output(update_log):
+            run_batch_generation(
+                db_path_t1=db_t1,
+                db_path_t2=db_t2,
+                model_name=model_name,
+                min_freq=min_freq,
+                max_samples=max_samples,
+                additional_words=custom_words,
+                progress_callback=progress_callback,
+                reset_collections=True,
+                test_mode=test_mode,
+            )
+        status_container.success("Batch Processing Complete!")
+    except Exception as e:
+        status_container.error(f"Batch process failed: {e}")
+        st.code(traceback.format_exc(), language="python")
 
 
 def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
@@ -407,12 +591,28 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
         )
         config["min_freq"] = min_freq
 
+        max_samples = st.number_input(
+            "Max Samples per Word",
+            min_value=10,
+            value=config.get("batch_max_samples", 200),
+            step=50,
+            help="Maximum number of sentence samples to collect per word per period."
+        )
+        config["batch_max_samples"] = max_samples
+
     with col2:
         custom_words_input = st.text_area(
             "Custom Words (optional)",
             placeholder="e.g. apple, banana\n(comma or newline separated)",
             help="Add specific words to the batch processing list, regardless of frequency.",
         )
+
+    # Test mode option
+    test_mode = st.checkbox(
+        "Test mode (quick)",
+        value=False,
+        help="For testing: 25 shared nouns, min freq 50, 50 embeddings per word per period"
+    )
 
     st.markdown("#### Advanced Model Config")
     render_layer_config(config)
@@ -424,7 +624,7 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
             raw_words = custom_words_input.replace("\n", ",").split(",")
             custom_words = [w.strip() for w in raw_words if w.strip()]
 
-        run_batch_embedding_process(db_t1, db_t2, model_name, min_freq, custom_words)
+        run_batch_embedding_process(db_t1, db_t2, model_name, min_freq, custom_words, test_mode=test_mode, max_samples=max_samples)
 
 
 def render_manage_embeddings_tab() -> None:
@@ -449,9 +649,13 @@ def delete_model_embeddings(model_safe_name: str) -> None:
     try:
         from semantic_change.vector_store import VectorStore
         store = VectorStore(persistence_path="data/chroma_db")
-        store.delete_collection(f"embeddings_t1_{model_safe_name}")
-        store.delete_collection(f"embeddings_t2_{model_safe_name}")
-        st.success(f"Deleted embeddings for {model_safe_name}")
+        success1, msg1 = store.delete_collection(f"embeddings_t1_{model_safe_name}")
+        success2, msg2 = store.delete_collection(f"embeddings_t2_{model_safe_name}")
+
+        if success1 or success2:
+            st.success(f"Deleted embeddings for {model_safe_name}\n\n{msg1}\n\n{msg2}")
+        else:
+            st.warning(f"No embeddings found for {model_safe_name}")
         time.sleep(1)
         st.rerun()
     except Exception as e:
@@ -478,6 +682,81 @@ def render_embeddings_page(config: dict, db_t1: str, db_t2: str) -> None:
 # Corpus Reports Page
 # =============================================================================
 
+def render_db_stats_summary(config: dict, db_t1: str, db_t2: str, period_t1_label: str, period_t2_label: str) -> None:
+    """Displays a summary of database statistics."""
+    from semantic_change.corpus import Corpus
+
+    # SQLite stats
+    st.markdown("#### Database Status")
+
+    try:
+        corpus1 = Corpus(period_t1_label, "", db_t1)
+        corpus2 = Corpus(period_t2_label, "", db_t2)
+        stats1 = corpus1.get_stats()
+        stats2 = corpus2.get_stats()
+
+        total_docs = stats1.get("files", 0) + stats2.get("files", 0)
+        total_sents = stats1.get("sentences", 0) + stats2.get("sentences", 0)
+        total_tokens = stats1.get("tokens", 0) + stats2.get("tokens", 0)
+
+        st.code(
+            f"SQLite:  {total_docs:,} documents, {total_sents:,} sentences, {total_tokens:,} tokens\n"
+            f"  {period_t1_label}:     {stats1.get('files', 0):,} documents, {stats1.get('sentences', 0):,} sentences, {stats1.get('tokens', 0):,} tokens\n"
+            f"  {period_t2_label}:     {stats2.get('files', 0):,} documents, {stats2.get('sentences', 0):,} sentences, {stats2.get('tokens', 0):,} tokens",
+            language=None
+        )
+    except Exception as e:
+        st.warning(f"Could not read SQLite stats: {e}")
+
+    # ChromaDB stats
+    try:
+        from semantic_change.vector_store import VectorStore
+        store = VectorStore(persistence_path="data/chroma_db")
+        available_models = store.get_available_models()
+
+        if available_models:
+            # Get stats for first available model
+            model = available_models[0]
+            coll_t1 = f"embeddings_t1_{model}"
+            coll_t2 = f"embeddings_t2_{model}"
+            count_t1 = store.count(coll_t1)
+            count_t2 = store.count(coll_t2)
+            total_embeddings = count_t1 + count_t2
+
+            # Get unique words and threshold
+            unique_words = 0
+            threshold = config.get("min_freq", "N/A")
+            
+            try:
+                # Fetch only metadatas for both collections to count unique lemmas
+                c1 = store.get_or_create_collection(coll_t1)
+                c2 = store.get_or_create_collection(coll_t2)
+                
+                m1 = c1.get(include=["metadatas"])["metadatas"]
+                m2 = c2.get(include=["metadatas"])["metadatas"]
+                
+                all_lemmas = set()
+                for m in m1: all_lemmas.add(m.get("lemma"))
+                for m in m2: all_lemmas.add(m.get("lemma"))
+                unique_words = len(all_lemmas)
+            except Exception:
+                unique_words = "N/A"
+
+            st.code(
+                f"Chroma ({model}):\n"
+                f"  Total:           {total_embeddings:,} embeddings\n"
+                f"  Unique Words:    {unique_words}\n"
+                f"  Freq. Threshold: {threshold}",
+                language=None
+            )
+        else:
+            st.code("Chroma: No embeddings found", language=None)
+    except Exception as e:
+        st.code(f"Chroma: Not available ({e})", language=None)
+
+    st.markdown("---")
+
+
 def render_reports_page(config: dict, db_t1: str, db_t2: str, period_t1_label: str, period_t2_label: str, dbs_exist: bool) -> None:
     """Renders the Corpus Reports page."""
     st.title("📊 Corpus Statistics")
@@ -485,6 +764,9 @@ def render_reports_page(config: dict, db_t1: str, db_t2: str, period_t1_label: s
     if not dbs_exist:
         st.error("Please run Ingestion first.")
         return
+
+    # Show database status summary
+    render_db_stats_summary(config, db_t1, db_t2, period_t1_label, period_t2_label)
 
     st.write("Compare word frequencies between the two time periods.")
     report_top_n = st.number_input("Top N Shared Words", value=30, min_value=10)
@@ -531,14 +813,17 @@ def generate_comparison_report_ui(
 
             report_path = os.path.join(OUTPUT_DIR, "processing_report.md")
 
-            generate_comparison_report(
+            markdown_report, df = generate_comparison_report(
                 manager.get_corpus(period_t1_label),
                 manager.get_corpus(period_t2_label),
                 top_n=top_n,
                 output_path=report_path,
                 model_name=model_name,
                 include_semantic_change=include_semantic_change,
+                return_dataframe=True,
             )
+            # Store dataframe in session state for display
+            st.session_state.report_dataframe = df
             st.success(f"Report saved to {report_path}")
         except Exception as e:
             st.error(f"Error: {e}")
@@ -551,8 +836,50 @@ def display_existing_report() -> None:
     if os.path.exists(report_path):
         st.markdown("---")
         st.subheader("Existing Report")
+
+        # Read markdown for header info
         with open(report_path, "r", encoding="utf-8") as f:
-            st.markdown(f.read())
+            content = f.read()
+
+        # Split into header (before table) and table
+        lines = content.split("\n")
+        header_lines = []
+        for line in lines:
+            if line.startswith("| Lemma"):
+                break
+            header_lines.append(line)
+
+        # Display header as markdown
+        st.markdown("\n".join(header_lines))
+
+        # Display table as sortable dataframe if available in session state
+        if "report_dataframe" in st.session_state and st.session_state.report_dataframe is not None:
+            st.dataframe(
+                st.session_state.report_dataframe,
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            # Fallback: parse markdown table to dataframe
+            import pandas as pd
+            table_lines = [l for l in lines if l.startswith("|") and not l.startswith("|---")]
+            if len(table_lines) > 1:
+                # Parse header
+                headers = [h.strip() for h in table_lines[0].split("|")[1:-1]]
+                # Parse rows
+                rows = []
+                for row_line in table_lines[1:]:
+                    cells = [c.strip() for c in row_line.split("|")[1:-1]]
+                    rows.append(cells)
+                df = pd.DataFrame(rows, columns=headers)
+                # Convert numeric columns
+                for col in df.columns:
+                    if col not in ["Lemma", "POS"]:
+                        df[col] = pd.to_numeric(df[col].str.replace("%", ""), errors="coerce")
+                st.dataframe(df, width="stretch", hide_index=True)
+            else:
+                # No table found, show raw markdown
+                st.markdown(content)
 
 
 # =============================================================================
@@ -743,7 +1070,7 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
             clust_red = params["clustering_reduction"] if params["clustering_reduction"] != "None" else None
             pos_filter = None if params["pos_filter"] == "None" else params["pos_filter"]
 
-            with capture_stdout(update_logs):
+            with capture_output(update_logs):
                 run_single_analysis(
                     target_word=params["target_word"],
                     db_path_t1=db_t1,

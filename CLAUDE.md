@@ -33,7 +33,10 @@ uv run streamlit run gui.py
 uv run python main.py --word factory --model bert-base-uncased
 
 # Batch analysis (pre-compute embeddings for all shared nouns)
-uv run python run_batch_analysis.py --model roberta-base --limit 1000
+uv run python -m src.semantic_change.embeddings_generation --model roberta-base --max-samples 200
+
+# Rank Semantic Change (find words with largest shift)
+uv run python src/rank_semantic_change.py --output output/ranking.csv
 ```
 
 ## Architecture
@@ -63,11 +66,13 @@ uv run python run_batch_analysis.py --model roberta-base --limit 1000
 
 ### Entry Points
 
-- **`gui.py`**: Streamlit interface with pages for Analysis Dashboard, Data Ingestion, Embeddings Config, and Corpus Reports. Configuration stored in `config.json`.
+- **`gui.py`**: Wrapper for `src/gui_app.py`. Streamlit interface with pages for Analysis Dashboard, Data Ingestion, Embeddings Config, and Corpus Reports. Configuration stored in `config.json`.
 
 - **`main.py`**: `run_single_analysis()` function for CLI-based single-word analysis.
 
-- **`run_batch_analysis.py`**: Pre-computes and caches embeddings for all shared nouns between corpora.
+- **`src/semantic_change/embeddings_generation.py`**: Pre-computes and caches embeddings for all shared nouns between corpora.
+
+- **`src/rank_semantic_change.py`**: Calculates semantic shift (cosine distance) for shared words.
 
 - **`run_ingest.py`**: Standalone ingestion script.
 

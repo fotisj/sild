@@ -4,7 +4,7 @@ import numpy as np
 import time
 from scipy.spatial.distance import cosine
 from semantic_change.vector_store import VectorStore
-from run_batch_analysis import get_top_shared_words
+from semantic_change.embeddings_generation import get_shared_words
 from tqdm import tqdm
 
 def compute_centroid_shift(
@@ -19,12 +19,11 @@ def compute_centroid_shift(
     
     # Collection naming
     safe_model = model_name.replace("/", "_").replace("-", "_")
-    coll_1800 = f"embeddings_1800_{safe_model}"
-    coll_1900 = f"embeddings_1900_{safe_model}"
+    coll_1800 = f"embeddings_t1_{safe_model}"
+    coll_1900 = f"embeddings_t2_{safe_model}"
     
     # 1. Identify words to analyze
-    # Re-use the logic to find shared words, so we know what to look for in the DB
-    target_words = get_top_shared_words(db1800, db1900, min_freq=min_freq)
+    target_words = get_shared_words(db1800, db1900, min_freq=min_freq)
     total_words = len(target_words)
     
     print(f"Targeting {total_words} words for ranking.")
@@ -35,8 +34,6 @@ def compute_centroid_shift(
     results = []
     
     # 3. Compute Shifts
-    # We process word by word. 
-    
     print(f"Computing distances using collections: {coll_1800} / {coll_1900}...")
     desc = "Computing centroids"
     
@@ -49,11 +46,12 @@ def compute_centroid_shift(
         
     for i, word in (enumerate(target_words) if progress_callback else enumerate(tqdm(target_words))):
         try:
-            # Fetch 1800
+            # Fetch 1800 (t1)
+            # Use lemma only (no POS check)
             data_1800 = v_store.get_by_metadata(coll_1800, where={"lemma": word}, limit=2000)
             vecs_1800 = data_1800['embeddings']
             
-            # Fetch 1900
+            # Fetch 1900 (t2)
             data_1900 = v_store.get_by_metadata(coll_1900, where={"lemma": word}, limit=2000)
             vecs_1900 = data_1900['embeddings']
             
@@ -71,8 +69,6 @@ def compute_centroid_shift(
             centroid_1900 = np.mean(vecs_1900, axis=0)
             
             # Cosine Distance
-            # dist = 1 - cosine_similarity
-            # scipy cosine returns distance (1 - similarity) directly
             dist = cosine(centroid_1800, centroid_1900)
             
             results.append({

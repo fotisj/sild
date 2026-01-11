@@ -5,23 +5,58 @@ from typing import List, Dict, Any, Tuple
 from pathlib import Path
 from collections import Counter
 
-class Ingestor:
-    def __init__(self, model: str = "en_core_web_lg"):
-        try:
-            # Check for GPU availability
-            if spacy.prefer_gpu():
-                print("GPU usage enabled for spaCy.")
-            else:
-                print("GPU not available or not supported by spaCy installation. Using CPU.")
+# Proactively import spaCy transformer packages if installed
+# This registers their factories with spaCy before any model load
+try:
+    import spacy_curated_transformers
+except ImportError:
+    pass
 
-            # Disable parser and ner for speed and memory efficiency
-            print(f"Loading spaCy model: {model}")
+try:
+    import spacy_transformers
+except ImportError:
+    pass
+
+
+class Ingestor:
+    def __init__(self, model: str = "en_core_web_lg", encoding: str = "utf-8"):
+        self.encoding = encoding
+        self.model_name = model
+
+        # Check for GPU availability
+        if spacy.prefer_gpu():
+            print("GPU usage enabled for spaCy.")
+        else:
+            print("GPU not available or not supported by spaCy installation. Using CPU.")
+
+        # Load spaCy model (download if needed for non-transformer models)
+        print(f"Loading spaCy model: {model}")
+        try:
             self.nlp = spacy.load(model, disable=["parser", "ner"])
-            self.nlp.add_pipe('sentencizer')
-            self.nlp.max_length = 6000000 # Increased limit
         except OSError:
-            print(f"Model {model} not found. Please install it.")
-            raise
+            print(f"Model '{model}' not found. Attempting to download...")
+            self._download_model(model)
+            self.nlp = spacy.load(model, disable=["parser", "ner"])
+
+        self.nlp.add_pipe('sentencizer')
+        self.nlp.max_length = 6000000  # Increased limit
+
+    def _download_model(self, model: str) -> None:
+        """Download a spaCy model if not installed."""
+        import subprocess
+        import sys
+
+        print(f"Downloading spaCy model: {model}")
+        result = subprocess.run(
+            [sys.executable, "-m", "spacy", "download", model],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"Download output: {result.stdout}")
+            print(f"Download errors: {result.stderr}")
+            raise OSError(f"Failed to download spaCy model '{model}'. Check the model name is valid.")
+        print(f"Successfully downloaded: {model}")
 
     def _init_db(self, db_path: Path):
         """Initialize the SQLite database with the required schema."""
@@ -31,6 +66,13 @@ class Ingestor:
         # Enable WAL mode for better concurrency/performance
         cursor.execute("PRAGMA journal_mode=WAL;")
         
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +107,17 @@ class Ingestor:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_lemma ON tokens(lemma)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos ON tokens(pos)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sent_file ON sentences(file_id)")
-        
+
+        # Store metadata about the ingestion
+        cursor.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("spacy_model", self.model_name)
+        )
+        cursor.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("encoding", self.encoding)
+        )
+
         conn.commit()
         return conn
 
@@ -86,7 +138,7 @@ class Ingestor:
             print(f"File {filename} already ingested. Skipping.")
             return
 
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(file_path, 'r', encoding=self.encoding, errors='replace') as f:
             text = f.read()
 
         doc = self.nlp(text)
@@ -145,8 +197,10 @@ class Ingestor:
         
         try:
             files = list(input_path.rglob('*.txt'))
-            if max_files:
-                files = files[:max_files]
+            if max_files and max_files < len(files):
+                import random
+                files = random.sample(files, max_files)
+                print(f"Randomly selected {max_files} files for ingestion.")
             
             total_files = len(files)
             print(f"Found {total_files} files to ingest.")

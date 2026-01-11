@@ -1,9 +1,17 @@
+import os
+# Suppress HuggingFace xet storage warning (falls back to HTTP which works fine)
+os.environ["HF_HUB_DISABLE_XET_WARNING"] = "1"
+
 import torch
 import numpy as np
 import spacy
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 from typing import List, Tuple, Dict, Any, Optional
 import warnings
+import logging
+
+# Suppress huggingface_hub xet warnings
+logging.getLogger("huggingface_hub.file_download").setLevel(logging.ERROR)
 
 class Embedder:
     """Base class for embedding generation."""
@@ -16,8 +24,9 @@ class BertEmbedder(Embedder):
     Allows configuration of which layers to use and how to combine them.
     Utilizes spacy-transformers for robust linguistic-to-transformer alignment.
     """
-    def __init__(self, model_name: str = 'bert-base-uncased', device: str = None, 
-                 layers: List[int] = None, layer_op: str = 'mean', lang: str = 'en'):
+    def __init__(self, model_name: str = 'bert-base-uncased', device: str = None,
+                 layers: List[int] = None, layer_op: str = 'mean', lang: str = 'en',
+                 filter_model: str = None):
         """
         Args:
             model_name: HuggingFace model name.
@@ -25,18 +34,26 @@ class BertEmbedder(Embedder):
             layers: List of layer indices to use (e.g., [-1, -2, -3, -4]). Default is [-1].
             layer_op: How to combine layers: 'mean', 'sum', or 'concat'. Default is 'mean'.
             lang: Language code for the blank spaCy model.
+            filter_model: spaCy model for neighbor filtering (lemma/pos). If None, uses a default based on lang.
         """
+        self.filter_model_name = filter_model
         self.device_name = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.device = torch.device(self.device_name)
         
+        import sys
         print(f"Loading model '{model_name}' on {self.device_name}...")
-        
+        sys.stdout.flush()
+
         # 1. Initialize spaCy pipeline with transformer
         try:
             # Set device for spacy-transformers before loading
             if self.device.type == "cuda":
+                print(f"  Requesting GPU {self.device.index if self.device.index is not None else 0}...")
+                sys.stdout.flush()
                 spacy.require_gpu(self.device.index if self.device.index is not None else 0)
-            
+
+            print(f"  Creating spaCy pipeline...")
+            sys.stdout.flush()
             self.nlp = spacy.blank(lang)
             # Use spacy-transformers to add the transformer component
             config = {
@@ -47,32 +64,78 @@ class BertEmbedder(Embedder):
                     "transformer_config": {"output_hidden_states": True}
                 }
             }
+            print(f"  Adding transformer component (downloading/loading model weights)...")
+            sys.stdout.flush()
             self.nlp.add_pipe("transformer", config=config)
-            
+
             # Initialize the pipeline (crucial for loading the actual model/tokenizer)
+            print(f"  Initializing pipeline...")
+            sys.stdout.flush()
             self.nlp.initialize()
-            
+            print(f"  spaCy pipeline ready.")
+            sys.stdout.flush()
+
         except Exception as e:
             print(f"Error initializing spacy-transformers: {e}")
+            sys.stdout.flush()
             raise
 
         # 2. For nearest neighbors, we still need the AutoModelForMaskedLM to access the head
         # and the tokenizer for decoding.
+        print(f"  Loading tokenizer...")
+        sys.stdout.flush()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.mlm_model = AutoModelForMaskedLM.from_pretrained(model_name).to(self.device)
-        self.mlm_model.eval()
+        print(f"  Tokenizer loaded.")
+        sys.stdout.flush()
+
+        # Suppress expected warning about unused pooler weights (MLM doesn't use them)
+        import logging
+        logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
+        print(f"  Loading MLM head (for semantic neighbors)...")
+        sys.stdout.flush()
+        try:
+            self.mlm_model = AutoModelForMaskedLM.from_pretrained(model_name).to(self.device)
+            self.mlm_model.eval()
+            print(f"  MLM head loaded.")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"  Warning: Could not load MLM head for '{model_name}': {e}")
+            print("  Semantic neighbors feature will be disabled for this model.")
+            sys.stdout.flush()
+            self.mlm_model = None
+        logging.getLogger("transformers.modeling_utils").setLevel(logging.WARNING)
         
         self.layers = layers if layers is not None else [-1]
         self.layer_op = layer_op.lower()
 
-        # Load a standard spaCy model for neighbor filtering (lemma/pos)
+        # Load a spaCy model for neighbor filtering (lemma/pos)
+        # Use provided filter_model, or default based on language
+        if self.filter_model_name:
+            filter_model_to_load = self.filter_model_name
+        else:
+            # Default models by language
+            default_models = {
+                'en': 'en_core_web_lg',
+                'de': 'de_core_news_lg',
+                'fr': 'fr_core_news_lg',
+                'es': 'es_core_news_lg',
+                'it': 'it_core_news_lg',
+                'nl': 'nl_core_news_lg',
+                'pt': 'pt_core_news_lg',
+            }
+            filter_model_to_load = default_models.get(lang, f'{lang}_core_news_lg')
+
         try:
-            # We use a non-transformer model for fast linguistic filtering of neighbors
-            self.filter_nlp = spacy.load("en_core_web_lg", disable=["parser", "ner"])
+            print(f"  Loading filter model '{filter_model_to_load}'...")
+            sys.stdout.flush()
+            self.filter_nlp = spacy.load(filter_model_to_load, disable=["parser", "ner"])
         except OSError:
-            print("Warning: spaCy model 'en_core_web_lg' not found. Neighbor filtering might be limited.")
+            print(f"  Warning: spaCy model '{filter_model_to_load}' not found. Neighbor filtering might be limited.")
+            sys.stdout.flush()
             self.filter_nlp = None
 
+        print(f"BertEmbedder initialization complete for '{model_name}'.")
+        sys.stdout.flush()
         # NLTK removed to support multi-language/historical corpora
 
     def _combine_layers(self, trf_data) -> torch.Tensor:
@@ -105,62 +168,74 @@ class BertEmbedder(Embedder):
     def batch_extract(self, items: List[Dict[str, Any]], batch_size: int = 32) -> List[Dict[str, Any]]:
         """
         Extracts embeddings for specific words using spacy-transformers alignment.
+        Optimized to batch GPU→CPU transfers.
         """
         results = []
-        
+
         # We process in batches to leverage GPU
         for i in range(0, len(items), batch_size):
             batch_items = items[i : i + batch_size]
             batch_texts = [x['text'] for x in batch_items]
-            batch_targets = [x['targets'] for x in batch_items] 
+            batch_targets = [x['targets'] for x in batch_items]
             batch_ids = [x['id'] for x in batch_items]
-            
+
             # 1. Run spaCy pipeline (includes transformer)
             # pipe() handles batching internally
             docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
-            
+
+            # Collect word vectors on GPU, transfer in batch at end
+            batch_word_vecs = []  # List of tensors on GPU
+            batch_metadata = []   # Corresponding metadata
+
             for doc_idx, doc in enumerate(docs):
                 sent_id = batch_ids[doc_idx]
                 sent_targets = batch_targets[doc_idx]
-                
+
                 trf_data = doc._.trf_data
                 # Combined vectors for all transformer tokens in this doc
-                combined_vectors = self._combine_layers(trf_data) # (seq_len, dim)
-                
+                combined_vectors = self._combine_layers(trf_data)  # (seq_len, dim)
+
                 # Alignment map: doc._.trf_data.align
                 # align[i] gives indices of transformer tokens for the i-th spacy token
                 align = trf_data.align
-                
-                for lemma, w_start, w_end in sent_targets:
+
+                for lemma, pos, w_start, w_end in sent_targets:
                     # Find the spacy token(s) that match the char span [w_start, w_end)
-                    # Use doc.char_span to find the token indices
                     span = doc.char_span(w_start, w_end, alignment_mode="expand")
                     if span is None:
                         continue
-                    
+
                     # Collect all transformer token indices for all spacy tokens in the span
                     trf_indices = []
                     for token in span:
                         trf_indices.extend(align[token.i].data.flatten())
-                    
+
                     if trf_indices:
-                        # Deduplicate indices
-                        trf_indices = sorted(list(set(trf_indices)))
-                        
-                        # Extract vectors
-                        sub_vectors = combined_vectors[trf_indices] # (num_subtokens, dim)
-                        
-                        # Pool (mean) to get word embedding
-                        word_vec = torch.mean(sub_vectors, dim=0).detach().cpu().numpy()
-                        
-                        results.append({
+                        # Deduplicate indices using set - faster than sorted(list(set()))
+                        trf_indices = list(set(trf_indices))
+
+                        # Extract vectors and pool on GPU
+                        sub_vectors = combined_vectors[trf_indices]  # (num_subtokens, dim)
+                        word_vec = torch.mean(sub_vectors, dim=0)  # Stay on GPU
+
+                        batch_word_vecs.append(word_vec)
+                        batch_metadata.append({
                             "lemma": lemma,
-                            "vector": word_vec,
+                            "pos": pos,
                             "sentence_id": sent_id,
                             "start_char": w_start,
                             "end_char": w_end
                         })
-        
+
+            # Batch transfer: stack all vectors and move to CPU once
+            if batch_word_vecs:
+                stacked = torch.stack(batch_word_vecs)  # (N, dim) on GPU
+                numpy_vecs = stacked.detach().cpu().numpy()  # Single transfer
+
+                for idx, meta in enumerate(batch_metadata):
+                    meta["vector"] = numpy_vecs[idx]
+                    results.append(meta)
+
         return results
 
     def get_embeddings(self, samples: List[Dict[str, Any]]) -> Tuple[np.ndarray, List[str]]:
@@ -173,7 +248,7 @@ class BertEmbedder(Embedder):
             items.append({
                 'id': s.get('sentence_id', 0),
                 'text': s['sentence'],
-                'targets': [(s['lemma'], s['start_char'], s['start_char'] + len(s['matched_word']))]
+                'targets': [(s['lemma'], s.get('pos', 'NOUN'), s['start_char'], s['start_char'] + len(s['matched_word']))]
             })
         
         extracted = self.batch_extract(items)
@@ -196,6 +271,9 @@ class BertEmbedder(Embedder):
         """
         Finds the nearest semantic neighbors by projecting through the MLM head.
         """
+        if self.mlm_model is None:
+            return {}
+
         # Ensure vector is a torch tensor
         vec_tensor = torch.from_numpy(vector).to(self.device).float()
         
