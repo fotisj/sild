@@ -744,9 +744,6 @@ def run_single_analysis(
     umap_n_components: Optional[int] = None,
     db_path_1800: Optional[str] = None,
     db_path_1900: Optional[str] = None,
-    embedder=None,
-    n_top_sentences: int = 10,
-    k_per_sentence: int = 6
 ) -> None:
     """
     Run semantic change analysis for a single word.
@@ -984,12 +981,8 @@ def parse_args() -> argparse.Namespace:
         help="Dimensionality reduction for visualization"
     )
     parser.add_argument(
-        "--n-top-sents", type=int, default=10,
-        help="Number of sentences for contextual MLM (fallback)"
-    )
-    parser.add_argument(
-        "--k-per-sent", type=int, default=6,
-        help="Predictions per sentence for contextual MLM (fallback)"
+        "--project", type=str, default="",
+        help="4-digit project ID (uses active project if not specified)"
     )
 
     return parser.parse_args()
@@ -998,7 +991,17 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
 
+    # Get or create project
+    from semantic_change.project_manager import ProjectManager
+    pm = ProjectManager()
+    if args.project:
+        project_id = args.project
+    else:
+        project_id = pm.ensure_default_project()
+        print(f"Using project: {project_id}")
+
     run_single_analysis(
+        project_id=project_id,
         target_word=args.word,
         db_path_t1=args.db_t1,
         db_path_t2=args.db_t2,
@@ -1009,6 +1012,4 @@ if __name__ == "__main__":
         clustering_reduction=args.clustering_reduction,
         clustering_n_components=args.clustering_dims,
         viz_reduction=args.viz_reduction,
-        n_top_sentences=args.n_top_sents,
-        k_per_sentence=args.k_per_sent
     )

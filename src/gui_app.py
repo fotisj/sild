@@ -64,8 +64,6 @@ def get_default_config() -> dict:
         "layer_op": "mean",
         "lang": "en",
         "context_window": 0,
-        "n_top_sentences": 10,
-        "k_per_sentence": 6,
     }
 
 
@@ -941,14 +939,16 @@ def render_dashboard_parameters(config: dict, available_models: list[str]) -> di
     params["selected_safe_model"] = selected_safe_model
 
     st.info(f"Using embeddings from: {selected_safe_model}")
-    params["model_name"] = st.text_input(
-        "Confirm Model ID (for Tokenizer)",
-        value=config["model_name"],
-    )
 
-    # Warn about mismatch
-    if params["model_name"].replace("/", "_").replace("-", "_") != selected_safe_model:
-        st.warning("⚠️ Model ID does not match the selected embedding set! Neighbor fallback might fail.")
+    # Derive a likely model name from the safe model name for the tokenizer
+    # Convert safe name back: LSX_UniWue_ModernGBERT_1B -> LSX-UniWue/ModernGBERT-1B (approximate)
+    # Use the selected safe model as default, user can override if needed
+    default_model = selected_safe_model if selected_safe_model else config["model_name"]
+    params["model_name"] = st.text_input(
+        "Model ID (for Tokenizer, usually auto-detected)",
+        value=default_model,
+        help="The HuggingFace model ID used for tokenization. Usually matches the embedding set.",
+    )
 
     params["target_word"] = st.text_input("Target Word", value=config["target_word"])
 
@@ -1060,20 +1060,6 @@ def render_neighbor_parameters(config: dict) -> dict:
         help="0 means use the sentence from DB. >0 reads raw file around the word.",
     )
 
-    st.markdown("##### Contextual Neighbors (MLM Aggregation)")
-    params["n_top_sentences"] = st.number_input(
-        "Sentences to sample",
-        min_value=1,
-        max_value=50,
-        value=config.get("n_top_sentences", 10),
-    )
-    params["k_per_sentence"] = st.number_input(
-        "Predictions per sentence",
-        min_value=1,
-        max_value=20,
-        value=config.get("k_per_sentence", 6),
-    )
-
     return params
 
 
@@ -1090,8 +1076,6 @@ def update_config_from_params(config: dict, params: dict) -> None:
     config["viz_reduction"] = params.get("viz_reduction", config["viz_reduction"])
     config["k_neighbors"] = params.get("k_neighbors", config["k_neighbors"])
     config["context_window"] = params.get("context_window", config["context_window"])
-    config["n_top_sentences"] = params.get("n_top_sentences", config["n_top_sentences"])
-    config["k_per_sentence"] = params.get("k_per_sentence", config["k_per_sentence"])
     config["model_name"] = params.get("model_name", config["model_name"])
 
 
@@ -1130,10 +1114,7 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                     viz_reduction=params["viz_reduction"],
                     n_samples=params["n_samples"],
                     viz_max_instances=config["viz_max_instances"],
-                    embedder=None,
                     context_window=params["context_window"],
-                    n_top_sentences=params["n_top_sentences"],
-                    k_per_sentence=params["k_per_sentence"],
                 )
 
             st.success("Analysis Complete!")
