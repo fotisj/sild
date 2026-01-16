@@ -1,0 +1,47 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/pytorch:24.09-py3
+
+%labels
+    Author SILD_Team
+    Version 1.0
+    Description Container for Semantic Change Analysis with GPU support
+
+%post
+    # Install system dependencies (the base image is Ubuntu-based)
+    apt-get update && apt-get install -y \
+        rsync \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Install uv
+    pip install uv
+
+    # Create working directory
+    mkdir -p /app
+
+%files
+    requirements.txt /app/requirements.txt
+
+%post
+    cd /app
+    # Install Python dependencies
+    # Note: The base image already has PyTorch installed.
+    # We trust uv to handle dependencies, but we might want to exclude torch re-installation
+    # if we want to use the optimized container version.
+    # For simplicity now, we let uv handle it, but in production we might filter requirements.
+    uv pip install --system -r requirements.txt
+
+    # Download spaCy models
+    python -m spacy download en_core_web_sm
+    python -m spacy download en_core_web_lg
+    python -m spacy download de_core_news_sm
+    python -m spacy download de_core_news_lg
+    python -m spacy download de_dep_news_trf
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONPATH=/app/src:$PYTHONPATH
+    export LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:$LD_LIBRARY_PATH
+
+%runscript
+    exec "$@"

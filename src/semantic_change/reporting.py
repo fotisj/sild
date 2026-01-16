@@ -15,6 +15,7 @@ def generate_comparison_report(
     model_name: str = None,
     include_semantic_change: bool = False,
     return_dataframe: bool = False,
+    project_id: str = None,
 ) -> str | Tuple[str, pd.DataFrame]:
     """
     Generates a report comparing word frequencies between two corpora.
@@ -28,6 +29,7 @@ def generate_comparison_report(
         model_name: Optional model name for computing semantic change.
         include_semantic_change: Whether to include semantic change column.
         return_dataframe: If True, returns (markdown_str, DataFrame) tuple.
+        project_id: 4-digit project identifier for embedding collections.
 
     Returns:
         The report content as a Markdown string, or (markdown, DataFrame) if return_dataframe=True.
@@ -66,12 +68,12 @@ def generate_comparison_report(
     coll_t2 = None
     available_lemmas = set()
 
-    if include_semantic_change and model_name:
+    if include_semantic_change and model_name and project_id:
         try:
             vector_store = VectorStore(persistence_path="data/chroma_db")
             safe_model = model_name.replace("/", "_").replace("-", "_")
-            coll_t1 = f"embeddings_t1_{safe_model}"
-            coll_t2 = f"embeddings_t2_{safe_model}"
+            coll_t1 = f"embeddings_{project_id}_t1_{safe_model}"
+            coll_t2 = f"embeddings_{project_id}_t2_{safe_model}"
 
             # Fetch available lemmas to prioritize them in the report
             try:

@@ -8,6 +8,7 @@ from semantic_change.embeddings_generation import get_shared_words
 from tqdm import tqdm
 
 def compute_centroid_shift(
+    project_id: str,
     db1800="data/corpus_t1.db",
     db1900="data/corpus_t2.db",
     min_freq=25,
@@ -16,11 +17,11 @@ def compute_centroid_shift(
     model_name="bert-base-uncased"
 ):
     print(f"--- Starting Semantic Change Ranking (Freq >= {min_freq}, Model: {model_name}) ---")
-    
-    # Collection naming
+
+    # Collection naming: embeddings_{project_id}_{period}_{model}
     safe_model = model_name.replace("/", "_").replace("-", "_")
-    coll_1800 = f"embeddings_t1_{safe_model}"
-    coll_1900 = f"embeddings_t2_{safe_model}"
+    coll_1800 = f"embeddings_{project_id}_t1_{safe_model}"
+    coll_1900 = f"embeddings_{project_id}_t2_{safe_model}"
     
     # 1. Identify words to analyze
     target_words = get_shared_words(db1800, db1900, min_freq=min_freq)
@@ -101,9 +102,24 @@ def compute_centroid_shift(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--project", type=str, default="", help="4-digit project ID (uses active project if not specified)")
     parser.add_argument("--min-freq", type=int, default=25)
     parser.add_argument("--output", type=str, default="output/semantic_change_ranking.csv")
     parser.add_argument("--model", type=str, default="bert-base-uncased")
     args = parser.parse_args()
-    
-    compute_centroid_shift(min_freq=args.min_freq, output_file=args.output, model_name=args.model)
+
+    # Get or create project
+    from semantic_change.project_manager import ProjectManager
+    pm = ProjectManager()
+    if args.project:
+        project_id = args.project
+    else:
+        project_id = pm.ensure_default_project()
+        print(f"Using project: {project_id}")
+
+    compute_centroid_shift(
+        project_id=project_id,
+        min_freq=args.min_freq,
+        output_file=args.output,
+        model_name=args.model
+    )

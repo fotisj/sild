@@ -13,6 +13,38 @@ import logging
 # Suppress huggingface_hub xet warnings
 logging.getLogger("huggingface_hub.file_download").setLevel(logging.ERROR)
 
+
+def detect_optimal_dtype() -> Optional[torch.dtype]:
+    """
+    Detects the optimal mixed precision dtype based on GPU capabilities.
+
+    Returns:
+        torch.bfloat16 for datacenter GPUs (A100, L40, H100, etc.)
+        torch.float16 for consumer GPUs (RTX 30xx, 40xx, etc.)
+        None for CPU or unsupported GPUs
+    """
+    if not torch.cuda.is_available():
+        return None
+
+    device_name = torch.cuda.get_device_name(0).lower()
+    capability = torch.cuda.get_device_capability(0)
+    major, minor = capability
+
+    # Check for bf16 support (compute capability 8.0+ has good bf16)
+    # Datacenter GPUs: A100 (8.0), L40 (8.9), H100 (9.0) - use bf16
+    # Consumer GPUs: RTX 3090 (8.6), RTX 4090 (8.9) - fp16 is faster
+
+    # Datacenter GPUs that benefit from bf16
+    datacenter_keywords = ['a100', 'a10', 'l40', 'h100', 'h200', 'v100', 'a30', 'a40']
+    is_datacenter = any(kw in device_name for kw in datacenter_keywords)
+
+    if is_datacenter and major >= 8:
+        return torch.bfloat16
+    elif major >= 7:  # Volta (7.0) and newer support fp16 well
+        return torch.float16
+    else:
+        return None
+
 class Embedder:
     """Base class for embedding generation."""
     def get_embeddings(self, samples: List[Dict[str, str]]) -> Tuple[np.ndarray, List[str]]:
@@ -39,9 +71,15 @@ class BertEmbedder(Embedder):
         self.filter_model_name = filter_model
         self.device_name = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.device = torch.device(self.device_name)
-        
+
+        # Detect optimal mixed precision dtype for this GPU
+        self.mixed_precision_dtype = detect_optimal_dtype()
+
         import sys
         print(f"Loading model '{model_name}' on {self.device_name}...")
+        if self.mixed_precision_dtype:
+            dtype_name = 'bfloat16' if self.mixed_precision_dtype == torch.bfloat16 else 'float16'
+            print(f"  Mixed precision enabled: {dtype_name}")
         sys.stdout.flush()
 
         # 1. Initialize spaCy pipeline with transformer
@@ -169,6 +207,7 @@ class BertEmbedder(Embedder):
         """
         Extracts embeddings for specific words using spacy-transformers alignment.
         Optimized to batch GPU→CPU transfers.
+        Uses mixed precision (bf16/fp16) when available for ~2x speedup.
         """
         results = []
 
@@ -181,7 +220,12 @@ class BertEmbedder(Embedder):
 
             # 1. Run spaCy pipeline (includes transformer)
             # pipe() handles batching internally
-            docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
+            # Use mixed precision if available (bf16 for datacenter GPUs, fp16 for consumer)
+            if self.mixed_precision_dtype and self.device.type == 'cuda':
+                with torch.autocast('cuda', dtype=self.mixed_precision_dtype):
+                    docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
+            else:
+                docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
 
             # Collect word vectors on GPU, transfer in batch at end
             batch_word_vecs = []  # List of tensors on GPU
@@ -298,13 +342,17 @@ class BertEmbedder(Embedder):
                 logits = torch.matmul(vec_tensor, decoder.weight.T)
                 if decoder.bias is not None:
                     logits += decoder.bias
-                logits = logits.unsqueeze(0).unsqueeze(0) 
+                logits = logits.unsqueeze(0).unsqueeze(0)
             else:
                 return {}
         else:
             with torch.no_grad():
-                # Some heads expect (batch, seq, dim)
-                logits = head_module(vec_tensor.unsqueeze(0).unsqueeze(0))
+                # Use mixed precision if available
+                if self.mixed_precision_dtype and self.device.type == 'cuda':
+                    with torch.autocast('cuda', dtype=self.mixed_precision_dtype):
+                        logits = head_module(vec_tensor.unsqueeze(0).unsqueeze(0))
+                else:
+                    logits = head_module(vec_tensor.unsqueeze(0).unsqueeze(0))
 
         with torch.no_grad():
             probs = torch.softmax(logits[0, 0], dim=-1)

@@ -27,6 +27,7 @@ from semantic_change.vector_store import VectorStore
 @dataclass
 class AnalysisConfig:
     """Configuration for semantic change analysis."""
+    project_id: str = ""  # 4-digit project identifier (required)
     target_word: str = "current"
     db_path_t1: str = "data/corpus_t1.db"
     db_path_t2: str = "data/corpus_t2.db"
@@ -106,10 +107,20 @@ def clean_output_directory(output_dir: str) -> None:
                 pass
 
 
-def get_collection_name(period_id: str, model_name: str) -> str:
-    """Generate a standardized collection name for the vector store."""
+def get_collection_name(project_id: str, period: str, model_name: str) -> str:
+    """
+    Generate a standardized collection name for the vector store.
+
+    Args:
+        project_id: 4-digit project identifier
+        period: "t1" or "t2"
+        model_name: HuggingFace model name
+
+    Returns:
+        Collection name in format: embeddings_{project_id}_{period}_{safe_model}
+    """
     safe_model = model_name.replace("/", "_").replace("-", "_")
-    return f"embeddings_{period_id}_{safe_model}"
+    return f"embeddings_{project_id}_{period}_{safe_model}"
 
 
 # =============================================================================
@@ -710,6 +721,7 @@ def validate_config(config: AnalysisConfig) -> Optional[str]:
 
 
 def run_single_analysis(
+    project_id: str,
     target_word: str = "current",
     db_path_t1: str = "data/corpus_t1.db",
     db_path_t2: str = "data/corpus_t2.db",
@@ -727,7 +739,7 @@ def run_single_analysis(
     n_samples: int = 50,
     viz_max_instances: int = 100,
     context_window: int = 0,
-    # Legacy parameters
+    # Legacy parameters (deprecated)
     use_umap: Optional[bool] = None,
     umap_n_components: Optional[int] = None,
     db_path_1800: Optional[str] = None,
@@ -759,6 +771,7 @@ def run_single_analysis(
 
     # Build config
     config = AnalysisConfig(
+        project_id=project_id,
         target_word=target_word,
         db_path_t1=db_path_t1,
         db_path_t2=db_path_t2,
@@ -790,8 +803,10 @@ def run_single_analysis(
 
     # Step 2: Initialize vector store and fetch embeddings
     print("--- Checking Vector Store ---")
-    coll_t1 = get_collection_name("t1", config.model_name)
-    coll_t2 = get_collection_name("t2", config.model_name)
+
+    if not config.project_id:
+        print("Error: project_id is required.")
+        return
 
     try:
         vector_store = VectorStore(persistence_path="data/chroma_db")
@@ -799,19 +814,31 @@ def run_single_analysis(
         print(f"Could not initialize Vector Store: {e}")
         return
 
-    data_t1 = fetch_embeddings_from_store(
-        vector_store, coll_t1, config.db_path_t1,
-        config.target_word, config.n_samples,
-        config.pos_filter, config.context_window,
-        config.period_t1_label
-    )
+    # Get collection names for this project and model
+    safe_model = config.model_name.replace("/", "_").replace("-", "_")
+    coll_t1, coll_t2 = vector_store.get_collection_names_for_model(config.project_id, safe_model)
+    if coll_t1 is None and coll_t2 is None:
+        print(f"No embedding collections found for project '{config.project_id}' and model '{config.model_name}'.")
+        print("Available models for this project:", vector_store.get_available_models(config.project_id))
+        return
 
-    data_t2 = fetch_embeddings_from_store(
-        vector_store, coll_t2, config.db_path_t2,
-        config.target_word, config.n_samples,
-        config.pos_filter, config.context_window,
-        config.period_t2_label
-    )
+    data_t1 = None
+    if coll_t1:
+        data_t1 = fetch_embeddings_from_store(
+            vector_store, coll_t1, config.db_path_t1,
+            config.target_word, config.n_samples,
+            config.pos_filter, config.context_window,
+            config.period_t1_label
+        )
+
+    data_t2 = None
+    if coll_t2:
+        data_t2 = fetch_embeddings_from_store(
+            vector_store, coll_t2, config.db_path_t2,
+            config.target_word, config.n_samples,
+            config.pos_filter, config.context_window,
+            config.period_t2_label
+        )
 
     if (data_t1 is None or data_t1.is_empty()) and (data_t2 is None or data_t2.is_empty()):
         print("No embeddings found in Vector Store. Please run embedding generation first.")

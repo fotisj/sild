@@ -36,6 +36,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def get_default_config() -> dict:
     """Returns the default configuration dictionary."""
     return {
+        "project_id": "",  # Will be auto-generated if empty
         "data_dir": "data",
         "input_dir_t1": "data_gutenberg/1800",
         "input_dir_t2": "data_gutenberg/1900",
@@ -124,12 +125,37 @@ def check_databases_exist(db_t1: str, db_t2: str) -> bool:
     return os.path.exists(db_t1) and os.path.exists(db_t2)
 
 
-def get_available_models() -> list[str]:
-    """Gets list of models with pre-computed embeddings from ChromaDB."""
+def ensure_project_id(config: dict) -> str:
+    """
+    Ensures config has a valid project_id, creating one if necessary.
+    Updates the config dict in place and saves to file.
+    Returns the project_id.
+    """
+    if config.get("project_id"):
+        return config["project_id"]
+
+    from semantic_change.project_manager import ProjectManager
+    pm = ProjectManager()
+    db_t1, db_t2 = get_db_paths(config)
+    project_id = pm.ensure_default_project(
+        label_t1=config.get("period_t1_label", "t1"),
+        label_t2=config.get("period_t2_label", "t2"),
+        db_t1=db_t1,
+        db_t2=db_t2
+    )
+    config["project_id"] = project_id
+    save_config(config)
+    return project_id
+
+
+def get_available_models(project_id: str) -> list[str]:
+    """Gets list of models with pre-computed embeddings from ChromaDB for a project."""
+    if not project_id:
+        return []
     try:
         from semantic_change.vector_store import VectorStore
         store = VectorStore(persistence_path="data/chroma_db")
-        return store.get_available_models()
+        return store.get_available_models(project_id)
     except Exception:
         return []
 
@@ -526,6 +552,7 @@ def render_layer_config(config: dict) -> None:
 
 
 def run_batch_embedding_process(
+    project_id: str,
     db_t1: str, db_t2: str,
     model_name: str, min_freq: int,
     custom_words: list[str],
@@ -535,7 +562,7 @@ def run_batch_embedding_process(
     """Executes the batch embedding generation process."""
     status_container = st.empty()
     status_container.info(f"Starting embedding generation for {model_name}...")
-    
+
     log_container = st.empty()
     logs = []
 
@@ -554,9 +581,10 @@ def run_batch_embedding_process(
 
     try:
         from semantic_change.embeddings_generation import run_batch_generation
-        
+
         with capture_output(update_log):
             run_batch_generation(
+                project_id=project_id,
                 db_path_t1=db_t1,
                 db_path_t2=db_t2,
                 model_name=model_name,
@@ -624,13 +652,16 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
             raw_words = custom_words_input.replace("\n", ",").split(",")
             custom_words = [w.strip() for w in raw_words if w.strip()]
 
-        run_batch_embedding_process(db_t1, db_t2, model_name, min_freq, custom_words, test_mode=test_mode, max_samples=max_samples)
+        run_batch_embedding_process(
+            config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
+            test_mode=test_mode, max_samples=max_samples
+        )
 
 
-def render_manage_embeddings_tab() -> None:
+def render_manage_embeddings_tab(project_id: str) -> None:
     """Renders the 'Manage Existing' embeddings tab content."""
     st.subheader("Existing Embedding Sets")
-    available_models = get_available_models()
+    available_models = get_available_models(project_id)
 
     if not available_models:
         st.info("No embeddings found in the database.")
@@ -641,16 +672,18 @@ def render_manage_embeddings_tab() -> None:
         col1, col2 = st.columns([3, 1])
         col1.markdown(f"**{m}**")
         if col2.button("Delete", key=f"del_{m}"):
-            delete_model_embeddings(m)
+            delete_model_embeddings(project_id, m)
 
 
-def delete_model_embeddings(model_safe_name: str) -> None:
+def delete_model_embeddings(project_id: str, model_safe_name: str) -> None:
     """Deletes embeddings for a specific model."""
     try:
         from semantic_change.vector_store import VectorStore
         store = VectorStore(persistence_path="data/chroma_db")
-        success1, msg1 = store.delete_collection(f"embeddings_t1_{model_safe_name}")
-        success2, msg2 = store.delete_collection(f"embeddings_t2_{model_safe_name}")
+        coll_t1 = f"embeddings_{project_id}_t1_{model_safe_name}"
+        coll_t2 = f"embeddings_{project_id}_t2_{model_safe_name}"
+        success1, msg1 = store.delete_collection(coll_t1)
+        success2, msg2 = store.delete_collection(coll_t2)
 
         if success1 or success2:
             st.success(f"Deleted embeddings for {model_safe_name}\n\n{msg1}\n\n{msg2}")
@@ -675,7 +708,7 @@ def render_embeddings_page(config: dict, db_t1: str, db_t2: str) -> None:
         render_create_embeddings_tab(config, db_t1, db_t2)
 
     with tab_manage:
-        render_manage_embeddings_tab()
+        render_manage_embeddings_tab(config["project_id"])
 
 
 # =============================================================================
@@ -712,35 +745,39 @@ def render_db_stats_summary(config: dict, db_t1: str, db_t2: str, period_t1_labe
     try:
         from semantic_change.vector_store import VectorStore
         store = VectorStore(persistence_path="data/chroma_db")
-        available_models = store.get_available_models()
+        project_id = config.get("project_id", "")
+        available_models = store.get_available_models(project_id) if project_id else []
 
         if available_models:
             # Get stats for first available model
             model = available_models[0]
-            coll_t1 = f"embeddings_t1_{model}"
-            coll_t2 = f"embeddings_t2_{model}"
+            coll_t1 = f"embeddings_{project_id}_t1_{model}"
+            coll_t2 = f"embeddings_{project_id}_t2_{model}"
             count_t1 = store.count(coll_t1)
             count_t2 = store.count(coll_t2)
             total_embeddings = count_t1 + count_t2
 
             # Get unique words and threshold
-            unique_words = 0
+            unique_words = "N/A"
             threshold = config.get("min_freq", "N/A")
-            
-            try:
-                # Fetch only metadatas for both collections to count unique lemmas
-                c1 = store.get_or_create_collection(coll_t1)
-                c2 = store.get_or_create_collection(coll_t2)
-                
-                m1 = c1.get(include=["metadatas"])["metadatas"]
-                m2 = c2.get(include=["metadatas"])["metadatas"]
-                
-                all_lemmas = set()
-                for m in m1: all_lemmas.add(m.get("lemma"))
-                for m in m2: all_lemmas.add(m.get("lemma"))
-                unique_words = len(all_lemmas)
-            except Exception:
-                unique_words = "N/A"
+
+            # Skip loading all metadata if collection is large (>10k embeddings)
+            # as it can crash the app on systems with limited memory
+            if total_embeddings < 10000:
+                try:
+                    # Fetch only metadatas for both collections to count unique lemmas
+                    c1 = store.get_or_create_collection(coll_t1)
+                    c2 = store.get_or_create_collection(coll_t2)
+
+                    m1 = c1.get(include=["metadatas"])["metadatas"]
+                    m2 = c2.get(include=["metadatas"])["metadatas"]
+
+                    all_lemmas = set()
+                    for m in m1: all_lemmas.add(m.get("lemma"))
+                    for m in m2: all_lemmas.add(m.get("lemma"))
+                    unique_words = len(all_lemmas)
+                except Exception:
+                    unique_words = "N/A"
 
             st.code(
                 f"Chroma ({model}):\n"
@@ -771,7 +808,8 @@ def render_reports_page(config: dict, db_t1: str, db_t2: str, period_t1_label: s
     st.write("Compare word frequencies between the two time periods.")
     report_top_n = st.number_input("Top N Shared Words", value=30, min_value=10)
 
-    available_models = get_available_models()
+    project_id = config.get("project_id", "")
+    available_models = get_available_models(project_id) if project_id else []
     include_semantic_change = bool(available_models)
     report_model_name = None
 
@@ -789,7 +827,8 @@ def render_reports_page(config: dict, db_t1: str, db_t2: str, period_t1_label: s
             db_t1, db_t2,
             period_t1_label, period_t2_label,
             report_top_n, report_model_name,
-            include_semantic_change
+            include_semantic_change,
+            project_id
         )
 
     display_existing_report()
@@ -799,7 +838,8 @@ def generate_comparison_report_ui(
     db_t1: str, db_t2: str,
     period_t1_label: str, period_t2_label: str,
     top_n: int, model_name: str | None,
-    include_semantic_change: bool
+    include_semantic_change: bool,
+    project_id: str
 ) -> None:
     """Generates and displays the comparison report."""
     with st.spinner("Generating Report..."):
@@ -821,6 +861,7 @@ def generate_comparison_report_ui(
                 model_name=model_name,
                 include_semantic_change=include_semantic_change,
                 return_dataframe=True,
+                project_id=project_id,
             )
             # Store dataframe in session state for display
             st.session_state.report_dataframe = df
@@ -1072,6 +1113,7 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
 
             with capture_output(update_logs):
                 run_single_analysis(
+                    project_id=config["project_id"],
                     target_word=params["target_word"],
                     db_path_t1=db_t1,
                     db_path_t2=db_t2,
@@ -1149,7 +1191,8 @@ def render_dashboard_page(
         st.error("Databases missing. Please go to 'Data Ingestion' first.")
         return
 
-    available_models = get_available_models()
+    project_id = config.get("project_id", "")
+    available_models = get_available_models(project_id) if project_id else []
     if not available_models:
         st.warning("⚠️ No embeddings found. Please go to the **Embeddings & Models** tab to generate them first.")
         return
@@ -1185,6 +1228,9 @@ def main():
         st.session_state.config = load_config()
 
     config = st.session_state.config
+
+    # Ensure project_id exists
+    project_id = ensure_project_id(config)
 
     # Sidebar
     page = render_navigation()

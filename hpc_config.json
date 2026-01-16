@@ -1,0 +1,11 @@
+{
+    "hostname": "10.106.223.223",
+    "username": "foj42sv",
+    "remote_work_dir": "/home/foj42sv/sild",
+    "remote_data_dir": "/home/foj42sv/sild/data",
+    "partition": "standard",
+    "gpu_type": "gpu:1",
+    "time_limit": "01:00:00",
+    "memory": "16G",
+    "container_path": "sild.sif"
+}

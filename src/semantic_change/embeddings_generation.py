@@ -197,8 +197,8 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
         print(f"No sentences found for {os.path.basename(db_path)}.")
         return
 
-    # Increased chunk size - ChromaDB handles large batches efficiently
-    chunk_size = 25
+    # Increased chunk size to reduce ChromaDB write frequency (avoids compaction errors)
+    chunk_size = 200
     # Larger batch size for embedding extraction
     embed_batch_size = 128
     desc = f"Processing {os.path.basename(db_path)} -> ChromaDB: {collection_name}"
@@ -258,12 +258,23 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
                 if pending_future is not None:
                     pending_future.result()
 
-def get_collection_name(period_id: str, model_name: str) -> str:
-    """Generates a consistent collection name based on internal period ID (t1/t2) and model."""
+def get_collection_name(project_id: str, period: str, model_name: str) -> str:
+    """
+    Generates a consistent collection name.
+
+    Args:
+        project_id: 4-digit project identifier
+        period: "t1" or "t2"
+        model_name: HuggingFace model name
+
+    Returns:
+        Collection name in format: embeddings_{project_id}_{period}_{safe_model}
+    """
     safe_model = model_name.replace("/", "_").replace("-", "_")
-    return f"embeddings_{period_id}_{safe_model}"
+    return f"embeddings_{project_id}_{period}_{safe_model}"
 
 def run_batch_generation(
+    project_id: str,
     db_path_t1="data/corpus_t1.db",
     db_path_t2="data/corpus_t2.db",
     output_dir_t1="data/embeddings/t1",
@@ -326,8 +337,8 @@ def run_batch_generation(
     print("Embedding model loaded successfully.")
     sys.stdout.flush()
 
-    coll_t1 = get_collection_name("t1", model_name)
-    coll_t2 = get_collection_name("t2", model_name)
+    coll_t1 = get_collection_name(project_id, "t1", model_name)
+    coll_t2 = get_collection_name(project_id, "t2", model_name)
 
     if reset_collections:
         print("--- Resetting Collections ---")
@@ -365,6 +376,7 @@ def run_batch_generation(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Batch Semantic Change Analysis (Embeddings Generation).")
+    parser.add_argument("--project", type=str, default="", help="4-digit project ID (uses active project if not specified)")
     parser.add_argument("--db-t1", type=str, default="data/corpus_t1.db", help="Path to Period 1 DB")
     parser.add_argument("--db-t2", type=str, default="data/corpus_t2.db", help="Path to Period 2 DB")
     parser.add_argument("--model", type=str, default="bert-base-uncased", help="HuggingFace model name")
@@ -373,14 +385,24 @@ if __name__ == "__main__":
     parser.add_argument("--words", type=str, default="", help="Comma-separated list of additional words")
     parser.add_argument("--reset", action="store_true", help="Delete existing collections before processing")
     parser.add_argument("--pos", type=str, default="NOUN,VERB,ADJ,ADV", help="Comma-separated POS tags to include")
-    
+
     args = parser.parse_args()
-    
+
+    # Get or create project
+    from semantic_change.project_manager import ProjectManager
+    pm = ProjectManager()
+    if args.project:
+        project_id = args.project
+    else:
+        project_id = pm.ensure_default_project(db_t1=args.db_t1, db_t2=args.db_t2)
+        print(f"Using project: {project_id}")
+
     user_words = [w.strip() for w in args.words.split(',')] if args.words else []
     user_pos = [p.strip().upper() for p in args.pos.split(',')] if args.pos else ('NOUN', 'VERB', 'ADJ', 'ADV')
-    
+
     run_batch_generation(
-        db_path_t1=args.db_t1, 
+        project_id=project_id,
+        db_path_t1=args.db_t1,
         db_path_t2=args.db_t2,
         model_name=args.model,
         min_freq=args.min_freq,
