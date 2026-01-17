@@ -1069,14 +1069,6 @@ def render_neighbor_parameters(config: dict) -> dict:
         value=config["k_neighbors"],
     )
 
-    params["context_window"] = st.slider(
-        "Context Window (chars around word)",
-        min_value=0,
-        max_value=5000,
-        value=config.get("context_window", 0),
-        help="0 means use the sentence from DB. >0 reads raw file around the word.",
-    )
-
     return params
 
 
@@ -1092,7 +1084,6 @@ def update_config_from_params(config: dict, params: dict) -> None:
     config["clustering_n_components"] = params.get("clustering_n_components", config["clustering_n_components"])
     config["viz_reduction"] = params.get("viz_reduction", config["viz_reduction"])
     config["k_neighbors"] = params.get("k_neighbors", config["k_neighbors"])
-    config["context_window"] = params.get("context_window", config["context_window"])
     config["model_name"] = params.get("model_name", config["model_name"])
 
 
@@ -1131,7 +1122,6 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                     viz_reduction=params["viz_reduction"],
                     n_samples=params["n_samples"],
                     viz_max_instances=config["viz_max_instances"],
-                    context_window=params["context_window"],
                 )
 
             st.success("Analysis Complete!")
