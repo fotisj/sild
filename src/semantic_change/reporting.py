@@ -16,6 +16,7 @@ def generate_comparison_report(
     include_semantic_change: bool = False,
     return_dataframe: bool = False,
     project_id: str = None,
+    progress_callback: callable = None,
 ) -> str | Tuple[str, pd.DataFrame]:
     """
     Generates a report comparing word frequencies between two corpora.
@@ -30,6 +31,7 @@ def generate_comparison_report(
         include_semantic_change: Whether to include semantic change column.
         return_dataframe: If True, returns (markdown_str, DataFrame) tuple.
         project_id: 4-digit project identifier for embedding collections.
+        progress_callback: Optional callback(current, total, description) for progress updates.
 
     Returns:
         The report content as a Markdown string, or (markdown, DataFrame) if return_dataframe=True.
@@ -140,7 +142,15 @@ def generate_comparison_report(
 
     # Build rows for both markdown and dataframe
     df_rows = []
-    for item in data[:top_n]:
+    
+    # Process only top_n items
+    items_to_process = data[:top_n]
+    total_items = len(items_to_process)
+    
+    for i, item in enumerate(items_to_process):
+        if progress_callback:
+            progress_callback(i + 1, total_items, f"Processing '{item['lemma']}'...")
+            
         sem_change = None
         if include_semantic_change and vector_store and coll_t1 and coll_t2:
             sem_change = compute_semantic_change(

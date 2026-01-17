@@ -840,33 +840,48 @@ def generate_comparison_report_ui(
     project_id: str
 ) -> None:
     """Generates and displays the comparison report."""
-    with st.spinner("Generating Report..."):
-        try:
-            from semantic_change.reporting import generate_comparison_report
-            from semantic_change.corpus import CorpusManager
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    def progress_callback(current, total, desc):
+        if total > 0:
+            progress = min(current / total, 1.0)
+            progress_bar.progress(progress)
+            status_text.text(f"{desc} ({current}/{total})")
 
-            manager = CorpusManager()
-            manager.add_corpus(period_t1_label, os.path.dirname(db_t1), db_t1)
-            manager.add_corpus(period_t2_label, os.path.dirname(db_t2), db_t2)
+    try:
+        from semantic_change.reporting import generate_comparison_report
+        from semantic_change.corpus import CorpusManager
 
-            report_path = os.path.join(OUTPUT_DIR, "processing_report.md")
+        manager = CorpusManager()
+        manager.add_corpus(period_t1_label, os.path.dirname(db_t1), db_t1)
+        manager.add_corpus(period_t2_label, os.path.dirname(db_t2), db_t2)
 
-            markdown_report, df = generate_comparison_report(
-                manager.get_corpus(period_t1_label),
-                manager.get_corpus(period_t2_label),
-                top_n=top_n,
-                output_path=report_path,
-                model_name=model_name,
-                include_semantic_change=include_semantic_change,
-                return_dataframe=True,
-                project_id=project_id,
-            )
-            # Store dataframe in session state for display
-            st.session_state.report_dataframe = df
-            st.success(f"Report saved to {report_path}")
-        except Exception as e:
-            st.error(f"Error: {e}")
-            st.exception(e)
+        report_path = os.path.join(OUTPUT_DIR, "processing_report.md")
+
+        markdown_report, df = generate_comparison_report(
+            manager.get_corpus(period_t1_label),
+            manager.get_corpus(period_t2_label),
+            top_n=top_n,
+            output_path=report_path,
+            model_name=model_name,
+            include_semantic_change=include_semantic_change,
+            return_dataframe=True,
+            project_id=project_id,
+            progress_callback=progress_callback
+        )
+        
+        # Clear progress UI
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Store dataframe in session state for display
+        st.session_state.report_dataframe = df
+        st.success(f"Report saved to {report_path}")
+    except Exception as e:
+        st.error(f"Error: {e}")
+        st.exception(e)
 
 
 def display_existing_report() -> None:
