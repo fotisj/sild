@@ -113,3 +113,7 @@ See `user_guide.md` for detailed instructions on:
 1.  Pushing code and data to the cluster (`src.cli.hpc push`).
 2.  Submitting jobs (`src.cli.hpc submit`).
 3.  Pulling results back to your local machine (`src.cli.hpc pull`).
+
+## Contributors
+
+This project is developed by **Fotis Jannidis** with significant contributions from **Claude** and **Gemini**. See [CONTRIBUTORS.md](CONTRIBUTORS.md) for details.
