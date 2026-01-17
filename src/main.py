@@ -629,7 +629,7 @@ def get_chroma_neighbors(
     target_word: Optional[str] = None,
     n_neighbors: int = 10,
     max_candidates: int = 500
-) -> Dict[str, np.ndarray]:
+) -> Dict[str, Dict]:
     """
     Find nearest neighbors by querying the vector store.
 
@@ -642,7 +642,7 @@ def get_chroma_neighbors(
         max_candidates: Maximum candidates to consider
 
     Returns:
-        Dict mapping lemma to mean embedding vector
+        Dict mapping lemma to dict with 'vector' (mean embedding) and 'count' (occurrences)
     """
     skip_lemmas = set()
     if target_word:
@@ -694,12 +694,13 @@ def get_chroma_neighbors(
 
         seen.add(lemma)
         mean_vec = lemma_vectors_sum[lemma] / lemma_counts[lemma]
-        top_unique.append((lemma, mean_vec))
+        count = lemma_counts[lemma]
+        top_unique.append((lemma, {'vector': mean_vec, 'count': count}))
 
         if len(top_unique) >= n_neighbors:
             break
 
-    return {lemma: vec for lemma, vec in top_unique}
+    return {lemma: data for lemma, data in top_unique}
 
 
 def create_neighbor_plots(
@@ -712,7 +713,9 @@ def create_neighbor_plots(
     k_neighbors: int,
     output_dir: str,
     project_id: str = None,
-    model_name: str = None
+    model_name: str = None,
+    period_t1_label: str = "t1",
+    period_t2_label: str = "t2"
 ) -> None:
     """
     Create neighbor visualization plots for each sense cluster.
@@ -728,6 +731,8 @@ def create_neighbor_plots(
         output_dir: Output directory for plots
         project_id: 4-digit project identifier (for filename prefix)
         model_name: HuggingFace model name (for filename prefix)
+        period_t1_label: Display label for first period
+        period_t2_label: Display label for second period
     """
     viz = Visualizer()
     unique_clusters = sorted(set(sense_labels))
@@ -741,6 +746,22 @@ def create_neighbor_plots(
             filename = base_name
         return os.path.join(output_dir, filename)
 
+    def categorize_period(count_t1: int, count_t2: int) -> str:
+        """
+        Categorize a neighbor based on period distribution.
+        Returns 't1' if >=95% from t1, 't2' if >=95% from t2, 'mixed' otherwise.
+        """
+        total = count_t1 + count_t2
+        if total == 0:
+            return 'mixed'
+        t1_ratio = count_t1 / total
+        if t1_ratio >= 0.95:
+            return 't1'
+        elif t1_ratio <= 0.05:
+            return 't2'
+        else:
+            return 'mixed'
+
     for cluster_id in unique_clusters:
         mask = sense_labels == cluster_id
         cluster_embs = embeddings[mask]
@@ -750,6 +771,7 @@ def create_neighbor_plots(
 
         centroid = np.mean(cluster_embs, axis=0)
         neighbors = {}
+        period_categories = {}
         source_label = "ChromaDB"
 
         if vector_store:
@@ -764,8 +786,47 @@ def create_neighbor_plots(
                     target_word=target_word, n_neighbors=k_neighbors
                 )
 
-                merged = {**n1, **n2}
-                neighbors = dict(list(merged.items())[:k_neighbors * 2])
+                # Merge neighbors from both periods, tracking counts
+                all_lemmas = set(n1.keys()) | set(n2.keys())
+                merged_data = {}
+
+                for lemma in all_lemmas:
+                    count_t1 = n1.get(lemma, {}).get('count', 0)
+                    count_t2 = n2.get(lemma, {}).get('count', 0)
+
+                    # Use vector from whichever period has more occurrences,
+                    # or average if both exist
+                    if lemma in n1 and lemma in n2:
+                        # Weighted average of vectors
+                        v1 = n1[lemma]['vector']
+                        v2 = n2[lemma]['vector']
+                        total = count_t1 + count_t2
+                        merged_vec = (v1 * count_t1 + v2 * count_t2) / total
+                    elif lemma in n1:
+                        merged_vec = n1[lemma]['vector']
+                    else:
+                        merged_vec = n2[lemma]['vector']
+
+                    merged_data[lemma] = {
+                        'vector': merged_vec,
+                        'count_t1': count_t1,
+                        'count_t2': count_t2
+                    }
+
+                # Sort by total count and take top k_neighbors * 2
+                sorted_lemmas = sorted(
+                    merged_data.keys(),
+                    key=lambda x: merged_data[x]['count_t1'] + merged_data[x]['count_t2'],
+                    reverse=True
+                )[:k_neighbors * 2]
+
+                for lemma in sorted_lemmas:
+                    data = merged_data[lemma]
+                    neighbors[lemma] = data['vector']
+                    period_categories[lemma] = categorize_period(
+                        data['count_t1'], data['count_t2']
+                    )
+
             except Exception as e:
                 print(f"ChromaDB lookup failed: {e}")
 
@@ -776,7 +837,9 @@ def create_neighbor_plots(
             neighbors,
             centroid_name=target_word,
             title=f"Semantic Neighbors for Cluster {cluster_id} ({source_label})",
-            save_path=make_path(cluster_id)
+            save_path=make_path(cluster_id),
+            period_categories=period_categories,
+            period_labels=(period_t1_label, period_t2_label)
         )
 
 
@@ -1012,7 +1075,9 @@ def run_single_analysis(
         config.k_neighbors,
         config.output_dir,
         project_id=config.project_id,
-        model_name=config.model_name
+        model_name=config.model_name,
+        period_t1_label=config.period_t1_label,
+        period_t2_label=config.period_t2_label
     )
 
     print("Done!")
