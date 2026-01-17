@@ -24,9 +24,9 @@ The analysis process is divided into three main stages:
 
 If you are new to Python, follow these steps to get started:
 
-1.  **Install Python:**
-    *   Go to [python.org](https://www.python.org/downloads/).
-    *   Download the latest version for your operating system (Windows/macOS).
+1.  **Install Python 3.12:**
+    *   Go to [python.org](https://www.python.org/downloads/release/python-3120/).
+    *   Download version 3.12 for your operating system (Windows/macOS).
     *   Run the installer. **Important:** On Windows, make sure to check the box that says **"Add Python to PATH"** before clicking Install.
 
 2.  **Open a Terminal:**
@@ -41,6 +41,8 @@ If you are new to Python, follow these steps to get started:
     *   This tool will help you install all other required software easily.
 
 ## Setup and Installation
+
+**Requirement:** Python 3.12
 
 1.  **Clone the repository:**
     ```bash
