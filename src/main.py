@@ -879,22 +879,22 @@ def create_neighbor_plots(
 
         print(f"Cluster {cluster_id} Neighbors ({source_label}): {list(neighbors.keys())}")
 
-        viz.plot_neighbors(
-            centroid,
-            neighbors,
-            centroid_name=target_word,
-            title=f"Semantic Neighbors for Cluster {cluster_id} ({source_label})",
-            save_path=make_path(cluster_id),
-            period_categories=period_categories,
-            period_labels=(period_t1_label, period_t2_label)
-        )
-
         viz.plot_neighbor_graph(
             centroid,
             neighbors,
             centroid_name=target_word,
             title=f"Semantic Neighbors Graph for Cluster {cluster_id} ({source_label})",
             save_path=make_graph_path(cluster_id),
+            period_categories=period_categories,
+            period_labels=(period_t1_label, period_t2_label)
+        )
+
+        viz.plot_neighbors(
+            centroid,
+            neighbors,
+            centroid_name=target_word,
+            title=f"Semantic Neighbors for Cluster {cluster_id} ({source_label})",
+            save_path=make_path(cluster_id),
             period_categories=period_categories,
             period_labels=(period_t1_label, period_t2_label)
         )

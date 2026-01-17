@@ -1181,33 +1181,7 @@ def display_visualizations(
             with open(path, "r", encoding="utf-8") as f:
                 st.components.v1.html(f.read(), height=600, scrolling=True)
 
-    # Neighbor files
-    if prefix:
-        neighbor_pattern = os.path.join(OUTPUT_DIR, f"{prefix}neighbors_cluster_*.html")
-    else:
-        neighbor_pattern = os.path.join(OUTPUT_DIR, "neighbors_cluster_*.html")
-
-    neighbor_files = sorted(glob.glob(neighbor_pattern))
-    if neighbor_files:
-        st.markdown("### 🕸️ Semantic Neighbors")
-        for nf in neighbor_files:
-            # Extract cluster name from filename
-            basename = os.path.basename(nf)
-            # Remove prefix if present
-            if prefix:
-                basename = basename.replace(prefix, "")
-            cluster_name = (
-                basename
-                .replace("neighbors_", "")
-                .replace(".html", "")
-                .replace("_", " ")
-                .title()
-            )
-            st.markdown(f"**{cluster_name}**")
-            with open(nf, "r", encoding="utf-8") as f:
-                st.components.v1.html(f.read(), height=600, scrolling=True)
-
-    # Neighbor Graph files
+    # Neighbor Graph files (shown first)
     if prefix:
         neighbor_graph_pattern = os.path.join(OUTPUT_DIR, f"{prefix}neighbors_graph_cluster_*.html")
     else:
@@ -1225,6 +1199,32 @@ def display_visualizations(
             cluster_name = (
                 basename
                 .replace("neighbors_graph_", "")
+                .replace(".html", "")
+                .replace("_", " ")
+                .title()
+            )
+            st.markdown(f"**{cluster_name}**")
+            with open(nf, "r", encoding="utf-8") as f:
+                st.components.v1.html(f.read(), height=600, scrolling=True)
+
+    # Neighbor files (shown second)
+    if prefix:
+        neighbor_pattern = os.path.join(OUTPUT_DIR, f"{prefix}neighbors_cluster_*.html")
+    else:
+        neighbor_pattern = os.path.join(OUTPUT_DIR, "neighbors_cluster_*.html")
+
+    neighbor_files = sorted(glob.glob(neighbor_pattern))
+    if neighbor_files:
+        st.markdown("### 🕸️ Semantic Neighbors")
+        for nf in neighbor_files:
+            # Extract cluster name from filename
+            basename = os.path.basename(nf)
+            # Remove prefix if present
+            if prefix:
+                basename = basename.replace(prefix, "")
+            cluster_name = (
+                basename
+                .replace("neighbors_", "")
                 .replace(".html", "")
                 .replace("_", " ")
                 .title()
