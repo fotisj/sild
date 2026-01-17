@@ -1118,16 +1118,39 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                 )
 
             st.success("Analysis Complete!")
-            display_visualizations()
+            display_visualizations(
+                project_id=config["project_id"],
+                model_name=params["model_name"],
+                target_word=params["target_word"]
+            )
 
         except Exception as e:
             st.error(f"Analysis failed: {e}")
             st.exception(e)
 
 
-def display_visualizations() -> None:
-    """Displays the generated visualization HTML files."""
+def display_visualizations(
+    project_id: str = None,
+    model_name: str = None,
+    target_word: str = None
+) -> None:
+    """
+    Displays the generated visualization HTML files.
+
+    Args:
+        project_id: 4-digit project identifier (for finding files with new naming)
+        model_name: HuggingFace model name (for finding files with new naming)
+        target_word: The word being analyzed (for finding files with new naming)
+    """
     st.subheader("Visualizations")
+
+    # Determine filename prefix
+    if project_id and model_name and target_word:
+        from main import get_model_short_name
+        model_short = get_model_short_name(model_name)
+        prefix = f"k{project_id}_{model_short}_{target_word}_"
+    else:
+        prefix = ""
 
     viz_files = [
         ("time_period.html", "⏳ Time Period Clustering"),
@@ -1135,7 +1158,8 @@ def display_visualizations() -> None:
         ("sense_time_combined.html", "🎨 Sense × Time (Combined)"),
     ]
 
-    for filename, title in viz_files:
+    for base_filename, title in viz_files:
+        filename = f"{prefix}{base_filename}" if prefix else base_filename
         path = os.path.join(OUTPUT_DIR, filename)
         if os.path.exists(path):
             st.markdown(f"### {title}")
@@ -1143,12 +1167,22 @@ def display_visualizations() -> None:
                 st.components.v1.html(f.read(), height=600, scrolling=True)
 
     # Neighbor files
-    neighbor_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "neighbors_cluster_*.html")))
+    if prefix:
+        neighbor_pattern = os.path.join(OUTPUT_DIR, f"{prefix}neighbors_cluster_*.html")
+    else:
+        neighbor_pattern = os.path.join(OUTPUT_DIR, "neighbors_cluster_*.html")
+
+    neighbor_files = sorted(glob.glob(neighbor_pattern))
     if neighbor_files:
         st.markdown("### 🕸️ Semantic Neighbors")
         for nf in neighbor_files:
+            # Extract cluster name from filename
+            basename = os.path.basename(nf)
+            # Remove prefix if present
+            if prefix:
+                basename = basename.replace(prefix, "")
             cluster_name = (
-                os.path.basename(nf)
+                basename
                 .replace("neighbors_", "")
                 .replace(".html", "")
                 .replace("_", " ")

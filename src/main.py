@@ -90,21 +90,41 @@ class VisualizationData:
 # Utility Functions
 # =============================================================================
 
-def clean_output_directory(output_dir: str) -> None:
-    """Remove old visualization files from the output directory."""
-    for f in glob.glob(os.path.join(output_dir, "neighbors_cluster_*.html")):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
+def clean_output_directory(
+    output_dir: str,
+    project_id: str = None,
+    model_name: str = None,
+    target_word: str = None
+) -> None:
+    """
+    Remove old visualization files from the output directory.
 
-    for filename in ["sense_clusters.html", "time_period.html", "sense_time_combined.html"]:
-        filepath = os.path.join(output_dir, filename)
-        if os.path.exists(filepath):
+    If project_id, model_name, and target_word are provided, only removes files
+    matching that specific prefix. Otherwise removes files with old naming convention.
+    """
+    if project_id and model_name and target_word:
+        # Clean files with the new naming pattern
+        prefix = f"k{project_id}_{get_model_short_name(model_name)}_{target_word}_"
+        for f in glob.glob(os.path.join(output_dir, f"{prefix}*.html")):
             try:
-                os.remove(filepath)
+                os.remove(f)
             except OSError:
                 pass
+    else:
+        # Clean files with the old naming pattern (for backwards compatibility)
+        for f in glob.glob(os.path.join(output_dir, "neighbors_cluster_*.html")):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+        for filename in ["sense_clusters.html", "time_period.html", "sense_time_combined.html"]:
+            filepath = os.path.join(output_dir, filename)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
 
 
 def get_collection_name(project_id: str, period: str, model_name: str) -> str:
@@ -121,6 +141,42 @@ def get_collection_name(project_id: str, period: str, model_name: str) -> str:
     """
     safe_model = model_name.replace("/", "_").replace("-", "_")
     return f"embeddings_{project_id}_{period}_{safe_model}"
+
+
+def get_model_short_name(model_name: str) -> str:
+    """
+    Generate a short form of the model name for filenames.
+
+    Args:
+        model_name: HuggingFace model name (e.g., "bert-base-uncased", "google/bert_uncased_L-2_H-128_A-2")
+
+    Returns:
+        Short model name with underscores (e.g., "bert_base_uncased", "google_bert_uncased_L_2_H_128_A_2")
+    """
+    # Replace slashes and hyphens with underscores
+    return model_name.replace("/", "_").replace("-", "_")
+
+
+def get_output_filename(
+    project_id: str,
+    model_name: str,
+    target_word: str,
+    base_name: str
+) -> str:
+    """
+    Generate a standardized output filename with project, model, and word prefix.
+
+    Args:
+        project_id: 4-digit project identifier
+        model_name: HuggingFace model name
+        target_word: The word being analyzed
+        base_name: Original filename (e.g., "time_period.html")
+
+    Returns:
+        Filename in format: k{project_id}_{model_short}_{target_word}_{base_name}
+    """
+    model_short = get_model_short_name(model_name)
+    return f"k{project_id}_{model_short}_{target_word}_{base_name}"
 
 
 # =============================================================================
@@ -502,7 +558,9 @@ def create_visualizations(
     viz_data: VisualizationData,
     target_word: str,
     output_dir: str,
-    viz_method: str
+    viz_method: str,
+    project_id: str = None,
+    model_name: str = None
 ) -> None:
     """
     Create all visualization plots.
@@ -512,8 +570,18 @@ def create_visualizations(
         target_word: Word being analyzed
         output_dir: Directory to save plots
         viz_method: Visualization dimensionality reduction method
+        project_id: 4-digit project identifier (for filename prefix)
+        model_name: HuggingFace model name (for filename prefix)
     """
     viz = Visualizer(method=viz_method)
+
+    # Determine filename generator
+    def make_path(base_name: str) -> str:
+        if project_id and model_name:
+            filename = get_output_filename(project_id, model_name, target_word, base_name)
+        else:
+            filename = base_name
+        return os.path.join(output_dir, filename)
 
     print("Plotting Clustering by Time...")
     viz.plot_clustering(
@@ -522,7 +590,7 @@ def create_visualizations(
         sentences=viz_data.sentences,
         filenames=viz_data.filenames,
         title=f"'{target_word}' by Time Period",
-        save_path=os.path.join(output_dir, "time_period.html"),
+        save_path=make_path("time_period.html"),
         highlight_spans=viz_data.highlight_spans
     )
 
@@ -533,7 +601,7 @@ def create_visualizations(
         sentences=viz_data.sentences,
         filenames=viz_data.filenames,
         title=f"'{target_word}' by Sense Cluster",
-        save_path=os.path.join(output_dir, "sense_clusters.html"),
+        save_path=make_path("sense_clusters.html"),
         highlight_spans=viz_data.highlight_spans
     )
 
@@ -545,7 +613,7 @@ def create_visualizations(
         sentences=viz_data.sentences,
         filenames=viz_data.filenames,
         title=f"'{target_word}' by Sense × Time",
-        save_path=os.path.join(output_dir, "sense_time_combined.html"),
+        save_path=make_path("sense_time_combined.html"),
         highlight_spans=viz_data.highlight_spans
     )
 
@@ -642,7 +710,9 @@ def create_neighbor_plots(
     collection_t1: str,
     collection_t2: str,
     k_neighbors: int,
-    output_dir: str
+    output_dir: str,
+    project_id: str = None,
+    model_name: str = None
 ) -> None:
     """
     Create neighbor visualization plots for each sense cluster.
@@ -656,9 +726,20 @@ def create_neighbor_plots(
         collection_t2: Collection name for second period
         k_neighbors: Number of neighbors per cluster
         output_dir: Output directory for plots
+        project_id: 4-digit project identifier (for filename prefix)
+        model_name: HuggingFace model name (for filename prefix)
     """
     viz = Visualizer()
     unique_clusters = sorted(set(sense_labels))
+
+    # Determine filename generator
+    def make_path(cluster_id: int) -> str:
+        base_name = f"neighbors_cluster_{cluster_id}.html"
+        if project_id and model_name:
+            filename = get_output_filename(project_id, model_name, target_word, base_name)
+        else:
+            filename = base_name
+        return os.path.join(output_dir, filename)
 
     for cluster_id in unique_clusters:
         mask = sense_labels == cluster_id
@@ -695,7 +776,7 @@ def create_neighbor_plots(
             neighbors,
             centroid_name=target_word,
             title=f"Semantic Neighbors for Cluster {cluster_id} ({source_label})",
-            save_path=os.path.join(output_dir, f"neighbors_cluster_{cluster_id}.html")
+            save_path=make_path(cluster_id)
         )
 
 
@@ -796,7 +877,12 @@ def run_single_analysis(
 
     # Step 1: Clean output
     print("--- Cleaning up old visualizations ---")
-    clean_output_directory(config.output_dir)
+    clean_output_directory(
+        config.output_dir,
+        project_id=config.project_id,
+        model_name=config.model_name,
+        target_word=config.target_word
+    )
 
     # Step 2: Initialize vector store and fetch embeddings
     print("--- Checking Vector Store ---")
@@ -910,7 +996,8 @@ def run_single_analysis(
 
     # Step 7: Create visualizations
     create_visualizations(
-        viz_data, config.target_word, config.output_dir, config.viz_reduction
+        viz_data, config.target_word, config.output_dir, config.viz_reduction,
+        project_id=config.project_id, model_name=config.model_name
     )
 
     # Step 8: Create neighbor plots
@@ -923,7 +1010,9 @@ def run_single_analysis(
         coll_t1,
         coll_t2,
         config.k_neighbors,
-        config.output_dir
+        config.output_dir,
+        project_id=config.project_id,
+        model_name=config.model_name
     )
 
     print("Done!")
