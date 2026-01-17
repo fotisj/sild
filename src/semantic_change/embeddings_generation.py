@@ -6,11 +6,12 @@ import time
 import argparse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import List, Dict, Tuple, Set, Any, Union
-from .embedding import BertEmbedder
+from typing import List, Dict, Tuple, Set, Any, Union, Type
+from .embedding import BertEmbedder, detect_optimal_batch_size
 from .vector_store import VectorStore
 from .corpus import get_spacy_model_from_db
 from tqdm import tqdm
+from tqdm.std import tqdm as tqdm_std
 
 def get_db_connection(db_path: str):
     conn = sqlite3.connect(db_path)
@@ -68,18 +69,23 @@ def get_shared_words(db_path_1: str, db_path_2: str, min_freq: int = 25, pos_fil
     shared = words_1.intersection(words_2)
     return sorted(list(shared))
 
-def collect_sentences_for_words(db_path: str, target_words: List[str], max_samples: int = 500, pos_filter: Union[str, List[str], Tuple[str, ...]] = ('NOUN', 'VERB', 'ADJ', 'ADV'), progress_callback=None) -> List[Dict[str, Any]]:
+def collect_sentences_for_words(db_path: str, target_words: List[str], max_samples: int = 500,
+                                pos_filter: Union[str, List[str], Tuple[str, ...]] = ('NOUN', 'VERB', 'ADJ', 'ADV'),
+                                tqdm_class: Type[tqdm_std] = tqdm) -> List[Dict[str, Any]]:
     """
     Retrieves sentences containing the target words from the SQLite database.
     Optimized to fetch in batches to avoid N+1 query problem.
+
+    Args:
+        tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
     """
     print(f"Collecting sentences from {db_path} (max_samples={max_samples}, pos={pos_filter})...")
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
-    
+
     sentence_tasks = defaultdict(list)
     unique_sentence_ids = set()
-    
+
     # Build query parts for POS filtering
     if isinstance(pos_filter, (list, tuple)):
         pos_condition = f"pos IN ({','.join('?' for _ in pos_filter)})"
@@ -87,111 +93,99 @@ def collect_sentences_for_words(db_path: str, target_words: List[str], max_sampl
     else:
         pos_condition = "pos = ?"
         pos_params = [pos_filter]
-        
+
     # Process words in chunks to keep SQL query size reasonable
     word_chunk_size = 100
-    iterator = range(0, len(target_words), word_chunk_size)
-    if not progress_callback:
-        iterator = tqdm(iterator, desc="Preparing word samples")
-        
-    total_words = len(target_words)
-    
-    for i in iterator:
-        chunk_words = target_words[i : i + word_chunk_size]
-        placeholders = ','.join('?' for _ in chunk_words)
-        
-        # We need a way to limit per word in SQL, or we fetch all and limit in Python.
-        # Fetching all matches for frequently occurring words might be heavy.
-        # Window functions would be ideal (ROW_NUMBER() OVER (PARTITION BY lemma)) but require SQLite 3.25+
-        # Let's assume SQLite 3.25+ is available or fallback to a slightly heavier fetch.
-        
-        try:
-             query = f"""
-                SELECT sentence_id, start_char, text, pos, lemma
-                FROM (
-                    SELECT 
-                        sentence_id, start_char, text, pos, lemma,
-                        ROW_NUMBER() OVER (PARTITION BY lemma ORDER BY random()) as rn
-                    FROM tokens 
-                    WHERE lemma IN ({placeholders}) AND {pos_condition}
-                ) 
-                WHERE rn <= ?
-            """
-             params = chunk_words + pos_params + [max_samples]
-             rows = cursor.execute(query, params).fetchall()
-             
-             for sent_id, start_char, token_text, token_pos, lemma in rows:
-                unique_sentence_ids.add(sent_id)
-                end_char = start_char + len(token_text)
-                sentence_tasks[sent_id].append((lemma, token_pos, start_char, end_char))
-                
-        except sqlite3.OperationalError:
-            # Fallback for older SQLite versions: Fetch all and limit in Python
-            # This is slower but safe
-            query = f"SELECT sentence_id, start_char, text, pos, lemma FROM tokens WHERE lemma IN ({placeholders}) AND {pos_condition}"
-            params = chunk_words + pos_params
-            rows = cursor.execute(query, params).fetchall()
-            
-            # Group by lemma to limit
-            counts = defaultdict(int)
-            import random
-            random.shuffle(rows) # Simple randomization
-            
-            for sent_id, start_char, token_text, token_pos, lemma in rows:
-                if counts[lemma] < max_samples:
+    total_chunks = (len(target_words) + word_chunk_size - 1) // word_chunk_size
+
+    with tqdm_class(total=total_chunks, desc="Preparing word samples") as pbar:
+        for i in range(0, len(target_words), word_chunk_size):
+            chunk_words = target_words[i : i + word_chunk_size]
+            placeholders = ','.join('?' for _ in chunk_words)
+
+            # We need a way to limit per word in SQL, or we fetch all and limit in Python.
+            # Window functions would be ideal (ROW_NUMBER() OVER (PARTITION BY lemma)) but require SQLite 3.25+
+
+            try:
+                query = f"""
+                    SELECT sentence_id, start_char, text, pos, lemma
+                    FROM (
+                        SELECT
+                            sentence_id, start_char, text, pos, lemma,
+                            ROW_NUMBER() OVER (PARTITION BY lemma ORDER BY random()) as rn
+                        FROM tokens
+                        WHERE lemma IN ({placeholders}) AND {pos_condition}
+                    )
+                    WHERE rn <= ?
+                """
+                params = chunk_words + pos_params + [max_samples]
+                rows = cursor.execute(query, params).fetchall()
+
+                for sent_id, start_char, token_text, token_pos, lemma in rows:
                     unique_sentence_ids.add(sent_id)
                     end_char = start_char + len(token_text)
                     sentence_tasks[sent_id].append((lemma, token_pos, start_char, end_char))
-                    counts[lemma] += 1
 
-        if progress_callback:
-            progress_callback(min(i + word_chunk_size, total_words), total_words, "Preparing word samples")
+            except sqlite3.OperationalError:
+                # Fallback for older SQLite versions: Fetch all and limit in Python
+                query = f"SELECT sentence_id, start_char, text, pos, lemma FROM tokens WHERE lemma IN ({placeholders}) AND {pos_condition}"
+                params = chunk_words + pos_params
+                rows = cursor.execute(query, params).fetchall()
+
+                # Group by lemma to limit
+                counts = defaultdict(int)
+                import random
+                random.shuffle(rows)
+
+                for sent_id, start_char, token_text, token_pos, lemma in rows:
+                    if counts[lemma] < max_samples:
+                        unique_sentence_ids.add(sent_id)
+                        end_char = start_char + len(token_text)
+                        sentence_tasks[sent_id].append((lemma, token_pos, start_char, end_char))
+                        counts[lemma] += 1
+
+            pbar.update(1)
 
     sent_ids_list = list(unique_sentence_ids)
     chunk_size = 999
-    
-    # 2. Fetching texts
-    desc = "Fetching texts"
-    total_chunks = len(range(0, len(sent_ids_list), chunk_size))
-    
-    batch_items = [] 
-    
-    if progress_callback:
-        progress_callback(0, total_chunks, desc)
-        
-    chunk_iterator = range(0, len(sent_ids_list), chunk_size)
-    if not progress_callback:
-        chunk_iterator = tqdm(chunk_iterator, desc=desc)
-        
-    for i, start_idx in enumerate(chunk_iterator):
-        chunk = sent_ids_list[start_idx : start_idx+chunk_size]
-        placeholders = ','.join('?' for _ in chunk)
-        rows = cursor.execute(f"SELECT id, text FROM sentences WHERE id IN ({placeholders})", chunk).fetchall()
-        
-        for sid, text in rows:
-            targets = sentence_tasks.get(sid, [])
-            if targets:
-                batch_items.append({
-                    "id": sid,
-                    "text": text,
-                    "targets": targets
-                })
-                
-        if progress_callback:
-            progress_callback(i + 1, total_chunks, desc)
-            
+    total_text_chunks = (len(sent_ids_list) + chunk_size - 1) // chunk_size
+
+    batch_items = []
+
+    with tqdm_class(total=total_text_chunks, desc="Fetching texts") as pbar:
+        for start_idx in range(0, len(sent_ids_list), chunk_size):
+            chunk = sent_ids_list[start_idx : start_idx+chunk_size]
+            placeholders = ','.join('?' for _ in chunk)
+            rows = cursor.execute(f"SELECT id, text FROM sentences WHERE id IN ({placeholders})", chunk).fetchall()
+
+            for sid, text in rows:
+                targets = sentence_tasks.get(sid, [])
+                if targets:
+                    batch_items.append({
+                        "id": sid,
+                        "text": text,
+                        "targets": targets
+                    })
+
+            pbar.update(1)
+
     conn.close()
     return batch_items
 
 def process_corpus(db_path: str, collection_name: str, target_words: List[str],
                    embedder: BertEmbedder, vector_store: VectorStore, max_samples: int = 200,
                    pos_filter: Union[str, List[str], Tuple[str, ...]] = ('NOUN', 'VERB', 'ADJ', 'ADV'),
-                   progress_callback=None):
+                   embed_batch_size: int = None, tqdm_class: Type[tqdm_std] = tqdm):
     """
     Orchestrates the processing of a single corpus: collection, embedding extraction, and saving to ChromaDB.
     Uses async DB writes to overlap with GPU computation.
+
+    Args:
+        embed_batch_size: Batch size for embedding extraction. If None, auto-detects based on GPU VRAM.
+        tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
     """
-    batch_items = collect_sentences_for_words(db_path, target_words, max_samples=max_samples, pos_filter=pos_filter, progress_callback=progress_callback)
+    batch_items = collect_sentences_for_words(db_path, target_words, max_samples=max_samples,
+                                               pos_filter=pos_filter, tqdm_class=tqdm_class)
     total_sents = len(batch_items)
     if total_sents == 0:
         print(f"No sentences found for {os.path.basename(db_path)}.")
@@ -199,9 +193,11 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
 
     # Increased chunk size to reduce ChromaDB write frequency (avoids compaction errors)
     chunk_size = 200
-    # Larger batch size for embedding extraction
-    embed_batch_size = 128
-    desc = f"Processing {os.path.basename(db_path)} -> ChromaDB: {collection_name}"
+    # Auto-detect optimal batch size based on GPU VRAM if not specified
+    if embed_batch_size is None:
+        embed_batch_size = detect_optimal_batch_size()
+        print(f"  Auto-detected embedding batch size: {embed_batch_size}")
+    desc = f"Processing {os.path.basename(db_path)} -> ChromaDB"
 
     def save_chunk(chunk_results):
         if not chunk_results:
@@ -223,8 +219,7 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
     with ThreadPoolExecutor(max_workers=2) as executor:
         pending_future: Future = None
 
-        if progress_callback:
-            progress_callback(0, total_sents, desc)
+        with tqdm_class(total=total_sents, desc=desc) as pbar:
             for i in range(0, total_sents, chunk_size):
                 chunk = batch_items[i : i + chunk_size]
                 chunk_results = embedder.batch_extract(chunk, batch_size=embed_batch_size)
@@ -235,28 +230,11 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
 
                 # Submit DB write asynchronously
                 pending_future = executor.submit(save_chunk, chunk_results)
-                progress_callback(min(i + chunk_size, total_sents), total_sents, desc)
+                pbar.update(len(chunk))
 
             # Wait for final write
             if pending_future is not None:
                 pending_future.result()
-        else:
-            with tqdm(total=total_sents, desc=desc) as pbar:
-                for i in range(0, total_sents, chunk_size):
-                    chunk = batch_items[i : i + chunk_size]
-                    chunk_results = embedder.batch_extract(chunk, batch_size=embed_batch_size)
-
-                    # Wait for previous write to complete before submitting new one
-                    if pending_future is not None:
-                        pending_future.result()
-
-                    # Submit DB write asynchronously
-                    pending_future = executor.submit(save_chunk, chunk_results)
-                    pbar.update(len(chunk))
-
-                # Wait for final write
-                if pending_future is not None:
-                    pending_future.result()
 
 def get_collection_name(project_id: str, period: str, model_name: str) -> str:
     """
@@ -283,7 +261,6 @@ def run_batch_generation(
     min_freq=25,
     max_samples=200,
     additional_words: List[str] = None,
-    progress_callback=None,
     db_path_1800=None,
     db_path_1900=None,
     output_dir_1800=None,
@@ -293,6 +270,8 @@ def run_batch_generation(
     test_mode: bool = False,
     test_num_words: int = 25,
     test_samples_per_word: int = 50,
+    embed_batch_size: int = None,
+    tqdm_class: Type[tqdm_std] = tqdm,
 ):
     """
     Entry point for the batch analysis/generation workflow.
@@ -302,6 +281,8 @@ def run_batch_generation(
         test_mode: If True, uses limited words/samples for quick testing.
         test_num_words: Number of shared nouns to use in test mode (default 25).
         test_samples_per_word: Embeddings per word per period in test mode (default 50).
+        embed_batch_size: Batch size for embedding extraction. If None, auto-detects based on GPU VRAM.
+        tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
     """
 
     # Handle legacy args
@@ -366,10 +347,12 @@ def run_batch_generation(
             words_t2 = sorted(list(set(words_t2 + additional_words)))
 
     print(f"\n--- Processing T1 Corpus (Collection: {coll_t1}) ---")
-    process_corpus(db_path_t1, coll_t1, words_t1, embedder, vector_store, max_samples=max_samples, pos_filter=pos_filter, progress_callback=progress_callback)
+    process_corpus(db_path_t1, coll_t1, words_t1, embedder, vector_store, max_samples=max_samples,
+                   pos_filter=pos_filter, embed_batch_size=embed_batch_size, tqdm_class=tqdm_class)
 
     print(f"\n--- Processing T2 Corpus (Collection: {coll_t2}) ---")
-    process_corpus(db_path_t2, coll_t2, words_t2, embedder, vector_store, max_samples=max_samples, pos_filter=pos_filter, progress_callback=progress_callback)
+    process_corpus(db_path_t2, coll_t2, words_t2, embedder, vector_store, max_samples=max_samples,
+                   pos_filter=pos_filter, embed_batch_size=embed_batch_size, tqdm_class=tqdm_class)
 
     elapsed_time = time.time() - start_time
     print(f"\nAll done! Batch generation completed in {elapsed_time/60:.2f} minutes.")
@@ -385,6 +368,7 @@ if __name__ == "__main__":
     parser.add_argument("--words", type=str, default="", help="Comma-separated list of additional words")
     parser.add_argument("--reset", action="store_true", help="Delete existing collections before processing")
     parser.add_argument("--pos", type=str, default="NOUN,VERB,ADJ,ADV", help="Comma-separated POS tags to include")
+    parser.add_argument("--batch-size", type=int, default=None, help="Embedding batch size (auto-detects based on GPU VRAM if not specified)")
 
     args = parser.parse_args()
 
@@ -409,5 +393,6 @@ if __name__ == "__main__":
         max_samples=args.max_samples,
         additional_words=user_words,
         reset_collections=args.reset,
-        pos_filter=user_pos
+        pos_filter=user_pos,
+        embed_batch_size=args.batch_size
     )

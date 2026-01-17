@@ -45,6 +45,35 @@ def detect_optimal_dtype() -> Optional[torch.dtype]:
     else:
         return None
 
+
+def detect_optimal_batch_size() -> int:
+    """
+    Detects an optimal batch size based on available GPU VRAM.
+
+    Returns:
+        Recommended batch size for embedding extraction.
+        - 512 for GPUs with 40GB+ VRAM (A100, L40, etc.)
+        - 256 for GPUs with 24GB+ VRAM (RTX 3090/4090, A5000, etc.)
+        - 128 for GPUs with 12GB+ VRAM (RTX 3080, etc.)
+        - 64 for GPUs with less VRAM or CPU
+    """
+    if not torch.cuda.is_available():
+        return 64
+
+    try:
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+
+        if vram_gb >= 40:
+            return 512
+        elif vram_gb >= 24:
+            return 256
+        elif vram_gb >= 12:
+            return 128
+        else:
+            return 64
+    except Exception:
+        return 128
+
 class Embedder:
     """Base class for embedding generation."""
     def get_embeddings(self, samples: List[Dict[str, str]]) -> Tuple[np.ndarray, List[str]]:
@@ -55,6 +84,9 @@ class BertEmbedder(Embedder):
     Generates contextual embeddings using a Transformer model and provides MLM-based decoding.
     Allows configuration of which layers to use and how to combine them.
     Utilizes spacy-transformers for robust linguistic-to-transformer alignment.
+
+    The MLM model and filter model are loaded lazily on first call to get_nearest_neighbors()
+    to reduce memory usage and startup time for batch embedding extraction.
     """
     def __init__(self, model_name: str = 'bert-base-uncased', device: str = None,
                  layers: List[int] = None, layer_op: str = 'mean', lang: str = 'en',
@@ -68,6 +100,8 @@ class BertEmbedder(Embedder):
             lang: Language code for the blank spaCy model.
             filter_model: spaCy model for neighbor filtering (lemma/pos). If None, uses a default based on lang.
         """
+        self.model_name = model_name
+        self.lang = lang
         self.filter_model_name = filter_model
         self.device_name = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.device = torch.device(self.device_name)
@@ -118,36 +152,60 @@ class BertEmbedder(Embedder):
             sys.stdout.flush()
             raise
 
-        # 2. For nearest neighbors, we still need the AutoModelForMaskedLM to access the head
-        # and the tokenizer for decoding.
+        # 2. Tokenizer is needed for decoding, load it now
         print(f"  Loading tokenizer...")
         sys.stdout.flush()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         print(f"  Tokenizer loaded.")
         sys.stdout.flush()
 
-        # Suppress expected warning about unused pooler weights (MLM doesn't use them)
-        import logging
-        logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
-        print(f"  Loading MLM head (for semantic neighbors)...")
-        sys.stdout.flush()
-        try:
-            self.mlm_model = AutoModelForMaskedLM.from_pretrained(model_name).to(self.device)
-            self.mlm_model.eval()
-            print(f"  MLM head loaded.")
-            sys.stdout.flush()
-        except Exception as e:
-            print(f"  Warning: Could not load MLM head for '{model_name}': {e}")
-            print("  Semantic neighbors feature will be disabled for this model.")
-            sys.stdout.flush()
-            self.mlm_model = None
-        logging.getLogger("transformers.modeling_utils").setLevel(logging.WARNING)
-        
+        # Lazy-loaded components (initialized on first use in get_nearest_neighbors)
+        self._mlm_model = None  # Will be loaded on first neighbor query
+        self._filter_nlp = None  # Will be loaded on first neighbor query
+        self._mlm_load_failed = False  # Track if MLM loading already failed
+
         self.layers = layers if layers is not None else [-1]
         self.layer_op = layer_op.lower()
 
-        # Load a spaCy model for neighbor filtering (lemma/pos)
-        # Use provided filter_model, or default based on language
+        print(f"BertEmbedder initialization complete for '{model_name}'.")
+        print(f"  (MLM head and filter model will be loaded on first neighbor query)")
+        sys.stdout.flush()
+
+    def _ensure_mlm_model(self):
+        """Lazily loads the MLM model on first access."""
+        if self._mlm_model is not None or self._mlm_load_failed:
+            return self._mlm_model
+
+        import sys
+        import logging
+
+        # Suppress expected warning about unused pooler weights
+        logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
+        print(f"  Loading MLM head (for semantic neighbors)...")
+        sys.stdout.flush()
+
+        try:
+            self._mlm_model = AutoModelForMaskedLM.from_pretrained(self.model_name).to(self.device)
+            self._mlm_model.eval()
+            print(f"  MLM head loaded.")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"  Warning: Could not load MLM head for '{self.model_name}': {e}")
+            print("  Semantic neighbors feature will be disabled for this model.")
+            sys.stdout.flush()
+            self._mlm_load_failed = True
+
+        logging.getLogger("transformers.modeling_utils").setLevel(logging.WARNING)
+        return self._mlm_model
+
+    def _ensure_filter_nlp(self):
+        """Lazily loads the spaCy filter model on first access."""
+        if self._filter_nlp is not None:
+            return self._filter_nlp
+
+        import sys
+
+        # Determine which model to load
         if self.filter_model_name:
             filter_model_to_load = self.filter_model_name
         else:
@@ -161,47 +219,58 @@ class BertEmbedder(Embedder):
                 'nl': 'nl_core_news_lg',
                 'pt': 'pt_core_news_lg',
             }
-            filter_model_to_load = default_models.get(lang, f'{lang}_core_news_lg')
+            filter_model_to_load = default_models.get(self.lang, f'{self.lang}_core_news_lg')
 
         try:
             print(f"  Loading filter model '{filter_model_to_load}'...")
             sys.stdout.flush()
-            self.filter_nlp = spacy.load(filter_model_to_load, disable=["parser", "ner"])
+            self._filter_nlp = spacy.load(filter_model_to_load, disable=["parser", "ner"])
+            print(f"  Filter model loaded.")
+            sys.stdout.flush()
         except OSError:
             print(f"  Warning: spaCy model '{filter_model_to_load}' not found. Neighbor filtering might be limited.")
             sys.stdout.flush()
-            self.filter_nlp = None
 
-        print(f"BertEmbedder initialization complete for '{model_name}'.")
-        sys.stdout.flush()
-        # NLTK removed to support multi-language/historical corpora
+        return self._filter_nlp
+
+    @property
+    def mlm_model(self):
+        """Property for backward compatibility - lazily loads MLM model."""
+        return self._ensure_mlm_model()
+
+    @property
+    def filter_nlp(self):
+        """Property for backward compatibility - lazily loads filter model."""
+        return self._ensure_filter_nlp()
 
     def _combine_layers(self, trf_data) -> torch.Tensor:
         """
         Extracts and combines hidden states from trf_data.
+        Optimized to stay on GPU when using cupy arrays (avoids GPU→CPU→GPU round-trip).
         """
         # trf_data.tensors[0] is (num_spans, seq_len, dim)
         arr = trf_data.tensors[0]
-        
-        # Handle cupy arrays if on GPU
-        if hasattr(arr, "get"):
-            arr = arr.get()
-            
-        # Reshape spans to a flat sequence: (num_spans * seq_len, dim)
-        # This matches the indices in the alignment map.
         num_spans, seq_len, dim = arr.shape
-        flat_arr = arr.reshape(num_spans * seq_len, dim)
-        
-        # If we only want the last layer (default)
-        if self.layers == [-1] or len(self.layers) == 0:
-            return torch.from_numpy(flat_arr).to(self.device)
 
-        # If multiple layers are requested, we currently only support the last layer
-        # due to the complexity of slicing model_output.hidden_states across spans.
-        if self.layers != [-1]:
+        # Multi-layer warning (we only support last layer currently)
+        if self.layers != [-1] and len(self.layers) > 0:
             warnings.warn("Multi-layer combination via spacy-transformers is currently limited to the last layer. Using last layer.")
-            
-        return torch.from_numpy(flat_arr).to(self.device)
+
+        # Handle cupy arrays (GPU) - use DLPack for zero-copy transfer to torch
+        if hasattr(arr, "__dlpack__"):
+            # Reshape on cupy array first (stays on GPU)
+            flat_arr = arr.reshape(num_spans * seq_len, dim)
+            # Zero-copy transfer via DLPack (requires torch >= 1.10)
+            return torch.from_dlpack(flat_arr)
+        elif hasattr(arr, "get"):
+            # Fallback for older cupy without DLPack support
+            arr = arr.get()
+            flat_arr = arr.reshape(num_spans * seq_len, dim)
+            return torch.from_numpy(flat_arr).to(self.device)
+        else:
+            # numpy array (CPU)
+            flat_arr = arr.reshape(num_spans * seq_len, dim)
+            return torch.from_numpy(flat_arr).to(self.device)
 
     def batch_extract(self, items: List[Dict[str, Any]], batch_size: int = 32) -> List[Dict[str, Any]]:
         """

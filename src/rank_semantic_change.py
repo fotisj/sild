@@ -2,10 +2,12 @@ import argparse
 import pandas as pd
 import numpy as np
 import time
+from typing import Type
 from scipy.spatial.distance import cosine
 from semantic_change.vector_store import VectorStore
 from semantic_change.embeddings_generation import get_shared_words
 from tqdm import tqdm
+from tqdm.std import tqdm as tqdm_std
 
 def compute_centroid_shift(
     project_id: str,
@@ -13,81 +15,71 @@ def compute_centroid_shift(
     db1900="data/corpus_t2.db",
     min_freq=25,
     output_file="output/semantic_change_ranking.csv",
-    progress_callback=None,
-    model_name="bert-base-uncased"
+    model_name="bert-base-uncased",
+    tqdm_class: Type[tqdm_std] = tqdm,
 ):
+    """
+    Computes semantic change ranking based on centroid shifts.
+
+    Args:
+        tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
+    """
     print(f"--- Starting Semantic Change Ranking (Freq >= {min_freq}, Model: {model_name}) ---")
 
     # Collection naming: embeddings_{project_id}_{period}_{model}
     safe_model = model_name.replace("/", "_").replace("-", "_")
     coll_1800 = f"embeddings_{project_id}_t1_{safe_model}"
     coll_1900 = f"embeddings_{project_id}_t2_{safe_model}"
-    
+
     # 1. Identify words to analyze
     target_words = get_shared_words(db1800, db1900, min_freq=min_freq)
     total_words = len(target_words)
-    
+
     print(f"Targeting {total_words} words for ranking.")
-    
+
     # 2. Initialize Vector Store
     v_store = VectorStore(persistence_path="data/chroma_db")
-    
+
     results = []
-    
+
     # 3. Compute Shifts
     print(f"Computing distances using collections: {coll_1800} / {coll_1900}...")
-    desc = "Computing centroids"
-    
-    if progress_callback:
-        progress_callback(0, total_words, desc)
-        
-    iterator = enumerate(target_words)
-    if not progress_callback:
-        iterator = tqdm(target_words)
-        
-    for i, word in (enumerate(target_words) if progress_callback else enumerate(tqdm(target_words))):
-        try:
-            # Fetch 1800 (t1)
-            # Use lemma only (no POS check)
-            data_1800 = v_store.get_by_metadata(coll_1800, where={"lemma": word}, limit=2000)
-            vecs_1800 = data_1800['embeddings']
-            
-            # Fetch 1900 (t2)
-            data_1900 = v_store.get_by_metadata(coll_1900, where={"lemma": word}, limit=2000)
-            vecs_1900 = data_1900['embeddings']
-            
-            count_1800 = len(vecs_1800) if vecs_1800 is not None else 0
-            count_1900 = len(vecs_1900) if vecs_1900 is not None else 0
-            
-            # We need enough data to be significant. 
-            if count_1800 < 5 or count_1900 < 5:
-                if progress_callback and i % 10 == 0:
-                    progress_callback(i + 1, total_words, desc)
-                continue
-                
-            # Compute Centroids
-            centroid_1800 = np.mean(vecs_1800, axis=0)
-            centroid_1900 = np.mean(vecs_1900, axis=0)
-            
-            # Cosine Distance
-            dist = cosine(centroid_1800, centroid_1900)
-            
-            results.append({
-                "word": word,
-                "distance": dist,
-                "count_1800": count_1800,
-                "count_1900": count_1900
-            })
-            
-        except Exception as e:
-            print(f"Error processing {word}: {e}")
-            pass
-        
-        if progress_callback and i % 5 == 0:
-            progress_callback(i + 1, total_words, desc)
 
-    if progress_callback:
-        progress_callback(total_words, total_words, "Ranking complete")
+    with tqdm_class(target_words, desc="Computing centroids") as pbar:
+        for word in pbar:
+            pbar.set_postfix_str(word)
+            try:
+                # Fetch 1800 (t1)
+                data_1800 = v_store.get_by_metadata(coll_1800, where={"lemma": word}, limit=2000)
+                vecs_1800 = data_1800['embeddings']
+
+                # Fetch 1900 (t2)
+                data_1900 = v_store.get_by_metadata(coll_1900, where={"lemma": word}, limit=2000)
+                vecs_1900 = data_1900['embeddings']
+
+                count_1800 = len(vecs_1800) if vecs_1800 is not None else 0
+                count_1900 = len(vecs_1900) if vecs_1900 is not None else 0
+
+                # We need enough data to be significant.
+                if count_1800 < 5 or count_1900 < 5:
+                    continue
+
+                # Compute Centroids
+                centroid_1800 = np.mean(vecs_1800, axis=0)
+                centroid_1900 = np.mean(vecs_1900, axis=0)
+
+                # Cosine Distance
+                dist = cosine(centroid_1800, centroid_1900)
+
+                results.append({
+                    "word": word,
+                    "distance": dist,
+                    "count_1800": count_1800,
+                    "count_1900": count_1900
+                })
+
+            except Exception as e:
+                print(f"Error processing {word}: {e}")
 
     # 4. Save Results
     if results:

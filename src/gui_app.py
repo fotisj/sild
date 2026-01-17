@@ -5,12 +5,35 @@ This module provides the web interface for the semantic change analysis toolkit.
 View logic is separated from business logic through small, focused functions.
 """
 import warnings
+import logging
+import threading
+import sys
+
 # Suppress Streamlit's ScriptRunContext warning (harmless, occurs during background processing)
 warnings.filterwarnings("ignore", message=".*missing ScriptRunContext.*")
+warnings.filterwarnings("ignore", message=".*Thread.*ScriptRunContext.*")
+
+# Suppress streamlit logger warnings about missing context
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+
+# Suppress threading excepthook warnings (these occur when stqdm updates from worker threads)
+_original_excepthook = threading.excepthook
+def _silent_excepthook(args):
+    if "ScriptRunContext" in str(args.exc_value):
+        return  # Silently ignore ScriptRunContext warnings
+    _original_excepthook(args)
+threading.excepthook = _silent_excepthook
+
+# Suppress sys.unraisablehook warnings
+_original_unraisablehook = sys.unraisablehook
+def _silent_unraisablehook(unraisable):
+    if "ScriptRunContext" in str(unraisable.exc_value):
+        return  # Silently ignore ScriptRunContext warnings
+    _original_unraisablehook(unraisable)
+sys.unraisablehook = _silent_unraisablehook
 
 import streamlit as st
 import os
-import sys
 import contextlib
 import json
 import glob
@@ -18,6 +41,7 @@ import time
 import traceback
 import zipfile
 from datetime import datetime
+from stqdm import stqdm
 
 # Ensure module path is available
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -393,13 +417,6 @@ def run_ingestion_process(
         log_container.code("".join(logs[-30:]))
 
     start_time = time.time()
-    pbar = st.progress(0)
-    status = st.empty()
-
-    def progress_callback(current, total, desc):
-        if total > 0:
-            pbar.progress(min(current / total, 1.0))
-            status.text(f"{desc} ({current}/{total})")
 
     with st.spinner("Ingesting corpora... This may take a while."):
         try:
@@ -415,7 +432,7 @@ def run_ingestion_process(
                     spacy_model=spacy_model,
                     file_encoding=file_encoding,
                     max_files=max_files,
-                    progress_callback=progress_callback,
+                    tqdm_class=stqdm,
                 )
 
             elapsed = time.time() - start_time
@@ -571,14 +588,6 @@ def run_batch_embedding_process(
         # Keep only last 30 lines to avoid UI lag
         log_container.code("".join(logs[-30:]))
 
-    pbar = st.progress(0)
-    status_text = st.empty()
-
-    def progress_callback(current, total, desc):
-        if total > 0:
-            pbar.progress(min(current / total, 1.0))
-            status_text.text(f"{desc} ({current}/{total})")
-
     try:
         from semantic_change.embeddings_generation import run_batch_generation
 
@@ -591,9 +600,9 @@ def run_batch_embedding_process(
                 min_freq=min_freq,
                 max_samples=max_samples,
                 additional_words=custom_words,
-                progress_callback=progress_callback,
                 reset_collections=True,
                 test_mode=test_mode,
+                tqdm_class=stqdm,
             )
         status_container.success("Batch Processing Complete!")
     except Exception as e:
@@ -842,15 +851,6 @@ def generate_comparison_report_ui(
     project_id: str
 ) -> None:
     """Generates and displays the comparison report."""
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    def progress_callback(current, total, desc):
-        if total > 0:
-            progress = min(current / total, 1.0)
-            progress_bar.progress(progress)
-            status_text.text(f"{desc} ({current}/{total})")
 
     try:
         from semantic_change.reporting import generate_comparison_report
@@ -871,13 +871,9 @@ def generate_comparison_report_ui(
             include_semantic_change=include_semantic_change,
             return_dataframe=True,
             project_id=project_id,
-            progress_callback=progress_callback
+            tqdm_class=stqdm,
         )
-        
-        # Clear progress UI
-        progress_bar.empty()
-        status_text.empty()
-        
+
         # Store dataframe in session state for display
         st.session_state.report_dataframe = df
         st.success(f"Report saved to {report_path}")

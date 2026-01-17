@@ -1,9 +1,11 @@
 import os
 import sqlite3
 import spacy
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Type
 from pathlib import Path
 from collections import Counter
+from tqdm import tqdm
+from tqdm.std import tqdm as tqdm_std
 
 # Proactively import spaCy transformer packages if installed
 # This registers their factories with spaCy before any model load
@@ -182,54 +184,53 @@ class Ingestor:
                     sent_tokens_data
                 )
 
-    def preprocess_corpus(self, input_dir: str, db_path: str, max_files: int = None, progress_callback=None) -> Dict[str, Any]:
+    def preprocess_corpus(self, input_dir: str, db_path: str, max_files: int = None,
+                          tqdm_class: Type[tqdm_std] = tqdm) -> Dict[str, Any]:
         """
         Processes text files in a directory and saves them to a SQLite DB.
+
+        Args:
+            input_dir: Path to directory containing text files.
+            db_path: Output SQLite database path.
+            max_files: Limit to N random files (for testing). None = all files.
+            tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
         """
         input_path = Path(input_dir)
         output_db_path = Path(db_path)
-        
+
         # Ensure parent dir exists
         output_db_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         conn = self._init_db(output_db_path)
         count = 0
-        
+
         try:
             files = list(input_path.rglob('*.txt'))
             if max_files and max_files < len(files):
                 import random
                 files = random.sample(files, max_files)
                 print(f"Randomly selected {max_files} files for ingestion.")
-            
+
             total_files = len(files)
             print(f"Found {total_files} files to ingest.")
-            
-            if progress_callback:
-                progress_callback(0, total_files, "Ingesting files")
-                
-            # Use tqdm if no callback is provided
-            iterator = files
-            if not progress_callback:
-                from tqdm import tqdm
-                iterator = tqdm(files, desc="Ingesting", unit="file")
-            
-            for i, txt_file in enumerate(iterator):
-                # Wrap each file processing in a transaction
-                try:
-                    self.process_file_to_db(str(txt_file), conn)
-                    conn.commit()
-                    count += 1
-                except Exception as e:
-                    print(f"Error processing {txt_file}: {e}")
-                    conn.rollback()
-                
-                if progress_callback:
-                    progress_callback(i + 1, total_files, f"Ingesting: {txt_file.name}")
-                    
+
+            with tqdm_class(total=total_files, desc="Ingesting", unit="file") as pbar:
+                for txt_file in files:
+                    # Wrap each file processing in a transaction
+                    try:
+                        self.process_file_to_db(str(txt_file), conn)
+                        conn.commit()
+                        count += 1
+                    except Exception as e:
+                        print(f"Error processing {txt_file}: {e}")
+                        conn.rollback()
+
+                    pbar.update(1)
+                    pbar.set_postfix_str(txt_file.name[:30])
+
         finally:
             conn.close()
-        
+
         print(f"Ingestion complete. Processed {count} files. Saved to {db_path}")
         return {"total_docs": count}
 

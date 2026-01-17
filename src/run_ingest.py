@@ -10,7 +10,9 @@ from semantic_change.corpus import Corpus
 import time
 import argparse
 import os
-from typing import Callable, Optional
+from typing import Optional, Type
+from tqdm import tqdm
+from tqdm.std import tqdm as tqdm_std
 
 
 def run_ingestion(
@@ -23,9 +25,9 @@ def run_ingestion(
     spacy_model: str = "en_core_web_lg",
     file_encoding: str = "utf-8",
     max_files: Optional[int] = None,
-    progress_callback: Optional[Callable[[int, int, str], None]] = None,
     generate_report: bool = True,
     report_top_n: int = 50,
+    tqdm_class: Type[tqdm_std] = tqdm,
 ) -> None:
     """
     Run the full corpus ingestion pipeline.
@@ -40,16 +42,16 @@ def run_ingestion(
         spacy_model: SpaCy model for tokenization/lemmatization
         file_encoding: Text file encoding (e.g., 'utf-8', 'cp1252', 'latin-1')
         max_files: Limit to N random files per period (for testing). None = all files.
-        progress_callback: Optional callback(current, total, description) for progress updates
         generate_report: Whether to generate a comparison report after ingestion
         report_top_n: Number of top words to include in the report
+        tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
     """
     print(f"--- Processing {label_t1} from {input_t1} ---")
     ingestor = Ingestor(model=spacy_model, encoding=file_encoding)
-    ingestor.preprocess_corpus(input_t1, db_t1, max_files=max_files, progress_callback=progress_callback)
+    ingestor.preprocess_corpus(input_t1, db_t1, max_files=max_files, tqdm_class=tqdm_class)
 
     print(f"--- Processing {label_t2} from {input_t2} ---")
-    ingestor.preprocess_corpus(input_t2, db_t2, max_files=max_files, progress_callback=progress_callback)
+    ingestor.preprocess_corpus(input_t2, db_t2, max_files=max_files, tqdm_class=tqdm_class)
 
     if generate_report:
         print("--- Generating Comparison Report ---")

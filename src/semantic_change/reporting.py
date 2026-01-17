@@ -1,10 +1,12 @@
-from typing import Dict, Tuple, List, Any, Optional
+from typing import Dict, Tuple, List, Any, Optional, Type
 import os
 import numpy as np
 import pandas as pd
 from .corpus import Corpus
 from .vector_store import VectorStore
 from .computing_semantic_change import compute_semantic_change
+from tqdm import tqdm
+from tqdm.std import tqdm as tqdm_std
 
 
 def generate_comparison_report(
@@ -16,7 +18,7 @@ def generate_comparison_report(
     include_semantic_change: bool = False,
     return_dataframe: bool = False,
     project_id: str = None,
-    progress_callback: callable = None,
+    tqdm_class: Type[tqdm_std] = tqdm,
 ) -> str | Tuple[str, pd.DataFrame]:
     """
     Generates a report comparing word frequencies between two corpora.
@@ -31,7 +33,7 @@ def generate_comparison_report(
         include_semantic_change: Whether to include semantic change column.
         return_dataframe: If True, returns (markdown_str, DataFrame) tuple.
         project_id: 4-digit project identifier for embedding collections.
-        progress_callback: Optional callback(current, total, description) for progress updates.
+        tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
 
     Returns:
         The report content as a Markdown string, or (markdown, DataFrame) if return_dataframe=True.
@@ -142,39 +144,38 @@ def generate_comparison_report(
 
     # Build rows for both markdown and dataframe
     df_rows = []
-    
+
     # Process only top_n items
     items_to_process = data[:top_n]
-    total_items = len(items_to_process)
-    
-    for i, item in enumerate(items_to_process):
-        if progress_callback:
-            progress_callback(i + 1, total_items, f"Processing '{item['lemma']}'...")
-            
-        sem_change = None
-        if include_semantic_change and vector_store and coll_t1 and coll_t2:
-            sem_change = compute_semantic_change(
-                coll_t1, coll_t2, item["lemma"], vector_store, pos=item["pos"]
-            )
-            sem_change_str = f"{sem_change:.3f}" if sem_change is not None else "N/A"
-            row = f"| {item['lemma']} | {item['pos']} | {item['freq1']} | {item['pct1']:.1f}% | {item['freq2']} | {item['pct2']:.1f}% | {item['min_freq']} | {sem_change_str} |"
-        else:
-            row = f"| {item['lemma']} | {item['pos']} | {item['freq1']} | {item['pct1']:.1f}% | {item['freq2']} | {item['pct2']:.1f}% | {item['min_freq']} |"
-        lines.append(row)
 
-        # Build dataframe row
-        df_row = {
-            "Lemma": item["lemma"],
-            "POS": item["pos"],
-            f"Freq ({name1})": item["freq1"],
-            f"%Docs ({name1})": round(item["pct1"], 1),
-            f"Freq ({name2})": item["freq2"],
-            f"%Docs ({name2})": round(item["pct2"], 1),
-            "Min Freq": item["min_freq"],
-        }
-        if include_semantic_change:
-            df_row["Semantic Change"] = sem_change
-        df_rows.append(df_row)
+    with tqdm_class(items_to_process, desc="Processing words") as pbar:
+        for item in pbar:
+            pbar.set_postfix_str(item['lemma'])
+
+            sem_change = None
+            if include_semantic_change and vector_store and coll_t1 and coll_t2:
+                sem_change = compute_semantic_change(
+                    coll_t1, coll_t2, item["lemma"], vector_store, pos=item["pos"]
+                )
+                sem_change_str = f"{sem_change:.3f}" if sem_change is not None else "N/A"
+                row = f"| {item['lemma']} | {item['pos']} | {item['freq1']} | {item['pct1']:.1f}% | {item['freq2']} | {item['pct2']:.1f}% | {item['min_freq']} | {sem_change_str} |"
+            else:
+                row = f"| {item['lemma']} | {item['pos']} | {item['freq1']} | {item['pct1']:.1f}% | {item['freq2']} | {item['pct2']:.1f}% | {item['min_freq']} |"
+            lines.append(row)
+
+            # Build dataframe row
+            df_row = {
+                "Lemma": item["lemma"],
+                "POS": item["pos"],
+                f"Freq ({name1})": item["freq1"],
+                f"%Docs ({name1})": round(item["pct1"], 1),
+                f"Freq ({name2})": item["freq2"],
+                f"%Docs ({name2})": round(item["pct2"], 1),
+                "Min Freq": item["min_freq"],
+            }
+            if include_semantic_change:
+                df_row["Semantic Change"] = sem_change
+            df_rows.append(df_row)
 
     report_content = "\n".join(lines)
 

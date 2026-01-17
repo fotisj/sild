@@ -8,25 +8,25 @@ How to use a slurm container here:
 https://doku.hpc.uni-wuerzburg.de/slurm-container/
 
 ### 1. Containerization (`hpc/`)
-- [ ] **Apptainer Definition File**: Create `hpc/sild.def` to build a portable environment.
+- [x] **Apptainer Definition File**: Create `hpc/sild.def` to build a portable environment.
     - Base Image: Official Python or NVIDIA PyTorch image.
     - Setup: Install system dependencies, `uv`, project dependencies (from `requirements.txt`), and download necessary spaCy models (`en_core_web_sm`, `en_core_web_lg` and also the German models!).
     - **Note**: Ensure the container uses `uv` for fast, reproducible installs.
 
 ### 2. Remote Management Logic (`src/hpc/`)
-- [ ] **Cluster Configuration**: Create a config handler (e.g., `hpc_config.json`) to store:
+- [x] **Cluster Configuration**: Create a config handler (e.g., `hpc_config.json`) to store:
     - Hostname, Username (SSH key auth assumed).
     - Remote paths (work directory, data directory).
     - SLURM defaults (partition, time limit, GPU count).
-- [ ] **Data Synchronization**: Implement `rsync` wrappers to:
+- [x] **Data Synchronization**: Implement `rsync` wrappers to:
     - Push: Codebase (`src/`), Raw Data (for ingestion), or SQLite DBs (for embedding).
     - Pull: Generated SQLite DBs or ChromaDB folders.
-- [ ] **Job Submission Generator**: Create a utility to generate `.slurm` scripts dynamically.
+- [x] **Job Submission Generator**: Create a utility to generate `.slurm` scripts dynamically.
     - Directives: `#SBATCH --partition=...`, `--gres=gpu:1`, `--cpus-per-task=...`.
     - Command: `apptainer exec --nv sild.sif uv run python ...`
 
 ### 3. CLI Integration
-- [ ] **New CLI Commands**: Add commands to a main entry point (e.g., `sild-hpc`) or subcommands:
+- [x] **New CLI Commands**: Add commands to a main entry point (e.g., `sild-hpc`) or subcommands:
     - `sild hpc push`: Sync code and data.
     - `sild hpc build`: Trigger container build (remotely or locally).
     - `sild hpc submit-ingest`: Submit ingestion job.
@@ -34,7 +34,7 @@ https://doku.hpc.uni-wuerzburg.de/slurm-container/
     - `sild hpc pull`: Retrieve results.
 
 ### 4. Documentation
-- [ ] **HPC Guide**: Add `docs/hpc_guide.md` explaining how to configure the SSH connection, build the container, and manage jobs.
+- [x] **HPC Guide**: Add `docs/hpc_guide.md` explaining how to configure the SSH connection, build the container, and manage jobs.
 
 ### 5. Improvements
 - [ ] **Externalize spaCy models for HPC**:
@@ -42,49 +42,41 @@ https://doku.hpc.uni-wuerzburg.de/slurm-container/
     - Configure the container to look for models there (via `SPACY_DATA_PATH` or symlinks).
     - **Benefit**: Allows adding new languages without rebuilding the huge container image.
 
-## II. Refactoring BertEmbedder & Embedding Performance Optimization
+## II. Refactoring BertEmbedder & Embedding Performance Optimization ✅
 Probably this can be done together with item one
 
+**Status: Core optimizations complete (Jan 2026)**
+
 ### 1. Lazy Loading (Quick Win)
-- [ ] **Lazy Load BertEmbedder Components**:
+- [x] **Lazy Load BertEmbedder Components**:
     - Currently, `BertEmbedder` initializes the **MLM Head** (for neighbor discovery) and the **spaCy Filter Model** (for cleaning neighbors) in its `__init__` method.
     - This happens even for Batch Analysis (Embedding Generation), where these components are not needed, causing unnecessary memory usage and startup delay.
     - **Goal**: Refactor `BertEmbedder` to load `self.mlm_model` and `self.filter_nlp` only when `get_nearest_neighbors()` is called for the first time.
     - **Benefit**: Faster startup for batch processing and reduced memory footprint.
+    - **Implemented**: Added `_ensure_mlm_model()` and `_ensure_filter_nlp()` methods with property accessors for backward compatibility.
 
 ### 2. Embedding Extraction Performance Optimizations
 
 The following optimizations target `batch_extract()` in `embedding.py` and `process_corpus()` in `embeddings_generation.py`:
 
-| Optimization | Impact | Effort | Description |
-|--------------|--------|--------|-------------|
-| Mixed precision (bf16/fp16) | **High** | Low | Enable automatic mixed precision for ~2x throughput on modern GPUs (L40, A100, etc.) |
-| Skip MLM/filter model | Medium | Low | Add `skip_neighbors=True` parameter to skip loading unused components |
-| Increase batch size | Medium | Low | Current batch_size=128 is conservative for 48GB VRAM GPUs |
-| Keep tensors on GPU | Medium | Medium | In `_combine_layers()`, avoid cupy→numpy→torch conversion per document |
-| Direct HuggingFace usage | **High** | High | Replace spacy-transformers with direct transformers library, handle subword alignment manually |
-| DataLoader prefetching | Medium | Medium | Pre-tokenize next batch while current batch is on GPU |
+| Optimization | Impact | Effort | Status | Description |
+|--------------|--------|--------|--------|-------------|
+| Mixed precision (bf16/fp16) | **High** | Low | ✅ Done | Enable automatic mixed precision for ~2x throughput on modern GPUs (L40, A100, etc.) |
+| Skip MLM/filter model | Medium | Low | ✅ Done | Implemented via lazy loading - models only loaded on first `get_nearest_neighbors()` call |
+| Increase batch size | Medium | Low | ✅ Done | Auto-detects optimal batch size based on GPU VRAM (512 for 40GB+, 256 for 24GB+, etc.) |
+| Keep tensors on GPU | Medium | Medium | ✅ Done | Use DLPack for zero-copy cupy→torch transfer in `_combine_layers()` |
+| Direct HuggingFace usage | **High** | High | Pending | Replace spacy-transformers with direct transformers library, handle subword alignment manually |
+| DataLoader prefetching | Medium | Medium | Pending | Pre-tokenize next batch while current batch is on GPU |
 
-#### Recommended Priority Order:
-1. **Mixed precision (bf16)** - Highest impact, minimal code change. Add `torch.autocast('cuda', dtype=torch.bfloat16)` context manager around inference.
-2. **Skip unnecessary models** - Add parameter to `BertEmbedder.__init__()` to skip MLM/filter model loading for batch jobs.
-3. **Increase batch size** - Tune `embed_batch_size` based on available VRAM (e.g., 256-512 for L40).
-4. **GPU tensor optimization** - Refactor `_combine_layers()` to stay on GPU when using cupy arrays.
+#### Implementation Summary (Completed):
+1. ✅ **Mixed precision (bf16/fp16)** - `detect_optimal_dtype()` in `embedding.py` auto-selects bf16 for datacenter GPUs, fp16 for consumer GPUs
+2. ✅ **Lazy loading** - `_ensure_mlm_model()` and `_ensure_filter_nlp()` methods load models only on first `get_nearest_neighbors()` call
+3. ✅ **Auto batch size** - `detect_optimal_batch_size()` selects 512/256/128/64 based on GPU VRAM, CLI flag `--batch-size` available
+4. ✅ **GPU tensor optimization** - `_combine_layers()` uses DLPack for zero-copy cupy→torch transfer
+
+#### Remaining (Lower Priority):
 5. **Direct HuggingFace** (long-term) - Major refactor but removes spacy-transformers overhead entirely.
-
-#### Implementation Notes:
-- Mixed precision example:
-  ```python
-  with torch.autocast('cuda', dtype=torch.bfloat16):
-      docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
-  ```
-- For skip_neighbors parameter:
-  ```python
-  def __init__(self, ..., skip_neighbors: bool = False):
-      if not skip_neighbors:
-          self.mlm_model = AutoModelForMaskedLM.from_pretrained(model_name)
-          self.filter_nlp = spacy.load(filter_model_to_load)
-  ```
+6. **DataLoader prefetching** - Pre-tokenize next batch while current batch is on GPU.
 
 ### III. Refactoring: Separation of Concerns & Cleanup
 
@@ -190,10 +182,14 @@ Implement the graph-based Word Sense Induction approach based on "Large Scale Su
 
 ## VII. Smaller Open Tasks
 - [ ] **Export**: Allow exporting the analysis results (cluster assignments, neighbor lists) as CSV/JSON.
-- [ ] **Cleaning up the GUI**: 
+- [ ] **Cleaning up the GUI**:
     - Separate Test gui and logic. Move the test parts in the gui (and the logic) for text ingest and embedding creation to a major page "Testing".
     - **Language Selection & Model Compatibility**: Add a dropdown for Language (EN, DE, etc.). Ensure the selected spaCy model matches the language to prevent runtime errors.
-- [ ] **GUI changes **: add time info for tasks like text ingest and embedding creation because they take long (similar to tqdm)
+- [x] **GUI changes**: add time info for tasks like text ingest and embedding creation because they take long (similar to tqdm)
+    - **Implemented**: Replaced custom `progress_callback` pattern with `tqdm_class` parameter across all long-running operations
+    - Added `stqdm` dependency for Streamlit-compatible progress bars
+    - Updated files: `embeddings_generation.py`, `ingestor.py`, `run_ingest.py`, `reporting.py`, `rank_semantic_change.py`, `gui_app.py`
+    - CLI uses standard `tqdm`, GUI uses `stqdm` (passed as `tqdm_class=stqdm`)
 
 
 ## VIII. Future Tasks
