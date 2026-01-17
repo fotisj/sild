@@ -1,12 +1,12 @@
 {
     "data_dir": "data",
-    "model_name": "LSX-UniWue/ModernGBERT_1B",
-    "target_word": "Haus",
+    "model_name": "google_bert_bert_base_german_cased",
+    "target_word": "klug",
     "k_neighbors": 10,
     "min_cluster_size": 2,
     "n_clusters": 3,
     "wsi_algorithm": "kmeans",
-    "pos_filter": "NOUN",
+    "pos_filter": "ADJ",
     "use_umap": true,
     "umap_n_components": 2,
     "limit_words": 2000,
@@ -36,6 +36,7 @@
     "k_per_sentence": 6,
     "m_final": 10,
     "file_encoding": "cp1252",
-    "max_files": null,
-    "batch_max_samples": 100
+    "max_files": 25,
+    "batch_max_samples": 100,
+    "project_id": "6569"
 }

@@ -1192,6 +1192,32 @@ def display_visualizations(
             with open(nf, "r", encoding="utf-8") as f:
                 st.components.v1.html(f.read(), height=600, scrolling=True)
 
+    # Neighbor Graph files
+    if prefix:
+        neighbor_graph_pattern = os.path.join(OUTPUT_DIR, f"{prefix}neighbors_graph_cluster_*.html")
+    else:
+        neighbor_graph_pattern = os.path.join(OUTPUT_DIR, "neighbors_graph_cluster_*.html")
+
+    neighbor_graph_files = sorted(glob.glob(neighbor_graph_pattern))
+    if neighbor_graph_files:
+        st.markdown("### 🕸️ Semantic Neighbors Graph")
+        for nf in neighbor_graph_files:
+            # Extract cluster name from filename
+            basename = os.path.basename(nf)
+            # Remove prefix if present
+            if prefix:
+                basename = basename.replace(prefix, "")
+            cluster_name = (
+                basename
+                .replace("neighbors_graph_", "")
+                .replace(".html", "")
+                .replace("_", " ")
+                .title()
+            )
+            st.markdown(f"**{cluster_name}**")
+            with open(nf, "r", encoding="utf-8") as f:
+                st.components.v1.html(f.read(), height=600, scrolling=True)
+
 
 def render_dashboard_page(
     config: dict,

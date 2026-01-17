@@ -104,15 +104,30 @@ def clean_output_directory(
     """
     if project_id and model_name and target_word:
         # Clean files with the new naming pattern
-        prefix = f"k{project_id}_{get_model_short_name(model_name)}_{target_word}_"
-        for f in glob.glob(os.path.join(output_dir, f"{prefix}*.html")):
+        model_short = get_model_short_name(model_name)
+        prefix = f"k{project_id}_{model_short}_{target_word}_"
+        
+        # Remove standard viz files
+        for base in ["time_period.html", "sense_clusters.html", "sense_time_combined.html"]:
+            path = os.path.join(output_dir, f"{prefix}{base}")
+            if os.path.exists(path):
+                try: os.remove(path)
+                except OSError: pass
+                
+        # Remove neighbor viz files (both standard and graph)
+        for pattern in ["neighbors_cluster_*.html", "neighbors_graph_cluster_*.html"]:
+            for f in glob.glob(os.path.join(output_dir, f"{prefix}{pattern}")):
+                try: os.remove(f)
+                except OSError: pass
+    else:
+        # Clean files with the old naming pattern (for backwards compatibility)
+        for f in glob.glob(os.path.join(output_dir, "neighbors_cluster_*.html")):
             try:
                 os.remove(f)
             except OSError:
                 pass
-    else:
-        # Clean files with the old naming pattern (for backwards compatibility)
-        for f in glob.glob(os.path.join(output_dir, "neighbors_cluster_*.html")):
+
+        for f in glob.glob(os.path.join(output_dir, "neighbors_graph_cluster_*.html")):
             try:
                 os.remove(f)
             except OSError:
@@ -662,45 +677,69 @@ def get_chroma_neighbors(
         return {}
 
     metas = results['metadatas'][0]
-    vecs = results['embeddings'][0] if results.get('embeddings') else []
-
+    
+    # Safely extract IDs and convert to standard Python list
+    ids_raw = results.get('ids', [[]])[0]
+    ids = []
+    if ids_raw is not None:
+        if isinstance(ids_raw, np.ndarray):
+            ids = ids_raw.tolist()
+        else:
+            ids = list(ids_raw)
+    
+    # 1. Identify top candidate lemmas based on frequency in the nearest neighbor results
     lemma_counts = Counter()
-    lemma_vectors_sum = defaultdict(lambda: np.zeros(centroid.shape))
-
+    lemma_ids = defaultdict(list)
+    
     for i, m in enumerate(metas):
         lemma = m.get('lemma', '').lower()
         if not lemma or len(lemma) < 2:
             continue
         if lemma in skip_lemmas:
             continue
-
         lemma_counts[lemma] += 1
+        
+        # Only collect ID if available and index is within bounds
+        if len(ids) > i:
+            lemma_ids[lemma].append(str(ids[i]))  # Ensure ID is string
 
-        if vecs:
-            v = np.array(vecs[i])
-            lemma_vectors_sum[lemma] += v
-
-    top_unique = []
-    seen = set()
-
-    for m in metas:
-        lemma = m.get('lemma', '').lower()
-        if not lemma or len(lemma) < 2:
-            continue
-        if lemma in skip_lemmas:
-            continue
-        if lemma in seen:
-            continue
-
-        seen.add(lemma)
-        mean_vec = lemma_vectors_sum[lemma] / lemma_counts[lemma]
-        count = lemma_counts[lemma]
-        top_unique.append((lemma, {'vector': mean_vec, 'count': count}))
-
-        if len(top_unique) >= n_neighbors:
+    # Get top candidates (fetch a few more than needed to handle potential fetch failures)
+    candidate_lemmas = [l for l, _ in lemma_counts.most_common(n_neighbors + 5)]
+    
+    final_results = {}
+    
+    # 2. Fetch actual embeddings for these candidates using the specific IDs found
+    for lemma in candidate_lemmas:
+        if len(final_results) >= n_neighbors:
             break
+            
+        try:
+            ids_to_fetch = lemma_ids[lemma]
+            if not ids_to_fetch:
+                continue
 
-    return {lemma: data for lemma, data in top_unique}
+            # Fetch the specific embedding instances that were close to the centroid
+            lemma_data = vector_store.get_by_ids(
+                collection_name, 
+                ids=ids_to_fetch
+            )
+            
+            if lemma_data and lemma_data.get('embeddings') is not None:
+                embs = lemma_data['embeddings']
+                if len(embs) > 0:
+                    # Calculate mean vector for the lemma
+                    embs_array = np.array(embs)
+                    mean_vec = np.mean(embs_array, axis=0)
+                    
+                    final_results[lemma] = {
+                        'vector': mean_vec,
+                        'count': lemma_counts[lemma]
+                    }
+        except Exception as e:
+            print(f"Failed to fetch embeddings for neighbor '{lemma}': {e}")
+            continue
+
+    return final_results
 
 
 def create_neighbor_plots(
@@ -740,6 +779,14 @@ def create_neighbor_plots(
     # Determine filename generator
     def make_path(cluster_id: int) -> str:
         base_name = f"neighbors_cluster_{cluster_id}.html"
+        if project_id and model_name:
+            filename = get_output_filename(project_id, model_name, target_word, base_name)
+        else:
+            filename = base_name
+        return os.path.join(output_dir, filename)
+
+    def make_graph_path(cluster_id: int) -> str:
+        base_name = f"neighbors_graph_cluster_{cluster_id}.html"
         if project_id and model_name:
             filename = get_output_filename(project_id, model_name, target_word, base_name)
         else:
@@ -838,6 +885,16 @@ def create_neighbor_plots(
             centroid_name=target_word,
             title=f"Semantic Neighbors for Cluster {cluster_id} ({source_label})",
             save_path=make_path(cluster_id),
+            period_categories=period_categories,
+            period_labels=(period_t1_label, period_t2_label)
+        )
+
+        viz.plot_neighbor_graph(
+            centroid,
+            neighbors,
+            centroid_name=target_word,
+            title=f"Semantic Neighbors Graph for Cluster {cluster_id} ({source_label})",
+            save_path=make_graph_path(cluster_id),
             period_categories=period_categories,
             period_labels=(period_t1_label, period_t2_label)
         )

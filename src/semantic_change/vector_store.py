@@ -105,6 +105,16 @@ class VectorStore:
             include=["embeddings", "metadatas"]
         )
 
+    def get_by_ids(self, collection_name: str, ids: List[str]):
+        """
+        Retrieves specific items by their IDs.
+        """
+        collection = self.get_or_create_collection(collection_name)
+        return collection.get(
+            ids=ids,
+            include=["embeddings", "metadatas"]
+        )
+
     def count(self, collection_name: str) -> int:
         return self.get_or_create_collection(collection_name).count()
 

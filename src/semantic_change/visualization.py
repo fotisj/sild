@@ -616,3 +616,210 @@ class Visualizer:
             print(f"Neighbor graph saved to {save_path}")
         else:
             fig.show()
+
+    def plot_neighbor_graph(self, centroid: np.ndarray,
+                            neighbor_map: Dict[str, np.ndarray],
+                            centroid_name: str = "CENTROID",
+                            title: str = "Semantic Neighbors Graph",
+                            save_path: str = None,
+                            period_categories: Dict[str, str] = None,
+                            period_labels: tuple = ("t1", "t2")):
+        """
+        Plots the semantic neighbors as a graph where each node is a lemma and each edge
+        connects a nearest neighbour. Uses cosine distance as weight for each edge.
+        For coloring the nodes use the same logic as "Semantic Neighbours".
+
+        Args:
+            centroid: The centroid embedding vector
+            neighbor_map: Dict mapping lemma to embedding vector
+            centroid_name: Name to display for the centroid
+            title: Plot title
+            save_path: Path to save the HTML file
+            period_categories: Dict mapping lemma to period category ('t1', 't2', or 'mixed')
+            period_labels: Tuple of (t1_label, t2_label) for display
+        """
+        import networkx as nx
+        from sklearn.metrics.pairwise import cosine_distances
+        import pandas as pd
+
+        if not neighbor_map:
+            return
+
+        neighbor_words = list(neighbor_map.keys())
+        neighbor_vecs = list(neighbor_map.values())
+
+        # Combine: Index 0 is Centroid
+        all_words = [centroid_name] + neighbor_words
+        all_vecs = np.vstack([centroid] + neighbor_vecs)
+
+        # Compute cosine distance matrix
+        dist_matrix = cosine_distances(all_vecs)
+
+        G = nx.Graph()
+        G.add_nodes_from(range(len(all_words)))
+
+        # Enforce Star Topology: Connect Centroid (0) to all neighbors (1..N)
+        for i in range(1, len(all_words)):
+            dist = dist_matrix[0, i]
+            similarity = 1.0 - dist
+            G.add_edge(0, i, weight=dist, similarity=similarity)
+
+        # Explicit Layout: Centroid at (0,0), neighbors at distance proportional to cosine distance
+        pos = {}
+        pos[0] = np.array([0.0, 0.0])
+        
+        n_neighbors = len(all_words) - 1
+        if n_neighbors > 0:
+            # Distribute angles evenly
+            angles = np.linspace(0, 2 * np.pi, n_neighbors, endpoint=False)
+            
+            # Map neighbors to positions
+            # We iterate i from 1 to n_neighbors
+            for i in range(1, len(all_words)):
+                dist = dist_matrix[0, i]
+                angle = angles[i-1]
+                
+                # Visual scaling factor to make the graph readable
+                # (cosine distance is usually 0.0-1.0, but might be small range)
+                # We can just use distance directly, or scale it if needed.
+                # Using distance directly ensures "length = distance".
+                r = dist 
+                
+                x = r * np.cos(angle)
+                y = r * np.sin(angle)
+                pos[i] = np.array([x, y])
+
+        # Create separate traces for each category (for legend)
+        t1_label, t2_label = period_labels
+        period_color_map = {
+            't1': '#1f77b4',    # Blue for period 1
+            't2': '#ff7f0e',    # Orange for period 2
+            'mixed': '#2ca02c'  # Green for mixed
+        }
+        period_display_map = {
+            't1': f'Mostly {t1_label}',
+            't2': f'Mostly {t2_label}',
+            'mixed': 'Mixed'
+        }
+
+        # Create separate traces for each category (for legend)
+        fig = go.Figure()
+
+        # Add edges as individual traces to support text labels and fixed styling
+        for edge in G.edges(data=True):
+            u, v, data = edge
+            x0, y0 = pos[u]
+            x1, y1 = pos[v]
+            
+            dist = data['weight']
+            
+            # Use fixed styling: only length represents distance
+            width = 1.5
+            opacity = 0.6
+            
+            fig.add_trace(go.Scatter(
+                x=[x0, x1, None],
+                y=[y0, y1, None],
+                line=dict(width=width, color=f'rgba(136, 136, 136, {opacity})'),
+                hoverinfo='none',
+                mode='lines',
+                showlegend=False
+            ))
+
+            # Add text label at the midpoint of the edge
+            mx = (x0 + x1) / 2
+            my = (y0 + y1) / 2
+            
+            fig.add_trace(go.Scatter(
+                x=[mx],
+                y=[my],
+                text=[f"{dist:.3f}"],
+                mode='text',
+                textfont=dict(color='gray', size=10),
+                hoverinfo='none',
+                showlegend=False
+            ))
+
+        # Add centroid as its own trace
+        centroid_x, centroid_y = pos[0]
+        fig.add_trace(go.Scatter(
+            x=[centroid_x],
+            y=[centroid_y],
+            mode='markers+text',
+            text=[centroid_name],
+            textposition="top center",
+            name='Target Word',
+            marker=dict(
+                color='red',
+                size=20,
+                symbol='star',
+                line=dict(width=1, color='black')
+            ),
+            hoverinfo='text'
+        ))
+
+        # Group neighbors by period category
+        category_nodes = {'t1': [], 't2': [], 'mixed': []}
+        for i, word in enumerate(neighbor_words):
+            node_idx = i + 1  # +1 because centroid is at index 0
+            category = 'mixed'  # default
+            if period_categories and word in period_categories:
+                category = period_categories[word]
+            category_nodes[category].append((node_idx, word))
+
+        # Add traces for each category
+        for category in ['t1', 't2', 'mixed']:
+            nodes = category_nodes[category]
+            if not nodes:
+                continue
+
+            node_x = []
+            node_y = []
+            node_text = []
+            for node_idx, word in nodes:
+                x, y = pos[node_idx]
+                node_x.append(x)
+                node_y.append(y)
+                node_text.append(word)
+
+            fig.add_trace(go.Scatter(
+                x=node_x,
+                y=node_y,
+                mode='markers+text',
+                text=node_text,
+                textposition="top center",
+                name=period_display_map[category],
+                marker=dict(
+                    color=period_color_map[category],
+                    size=12,
+                    symbol='circle',
+                    line=dict(width=1, color='black')
+                ),
+                hoverinfo='text'
+            ))
+
+        fig.update_layout(
+            title=title,
+            template="plotly_white",
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            ),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(
+                showgrid=False, 
+                zeroline=False, 
+                showticklabels=False,
+                scaleanchor="x",
+                scaleratio=1
+            )
+        )
+
+        if save_path:
+            fig.write_html(save_path)
+            print(f"Neighbor graph saved to {save_path}")
+        else:
+            fig.show()
