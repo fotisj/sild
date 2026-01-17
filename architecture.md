@@ -4,12 +4,14 @@
 
 The SILD (Semantic Change Analysis) system allows users to analyze how the meaning of words shifts between two distinct time periods (T1 and T2). It processes raw text corpora, generates contextualized word embeddings using Large Language Models (LLMs), and clusters these embeddings to identify and visualize distinct word senses.
 
-## Data Flow Pipeline
+The system supports both local execution and High-Performance Computing (HPC) environments for heavy processing (ingestion and embedding generation).
+
+## Data Flow Pipeline (Local/Logical)
 
 ```ascii
 +-------------------+       +-------------------+
 | Raw Text Corpora  |       |   Spacy Model     |
-| (data_source/t1)  |       | (en_core_web_lg)  |
+| (data_source/t1)  |       |e.g.en_core_web_lg |
 | (data_source/t2)  |       |                   |
 +---------+---------+       +---------+---------+
           |                           |
@@ -21,6 +23,7 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
 | 1. Tokenization & Sentence Splitting              |
 | 2. Lemmatization & POS Tagging                    |
 | 3. Storage in Structured SQLite DB                |
+| 4. Project Registration (ProjectManager)          |
 +-------------------------+-------------------------+
                           |
                           v
@@ -50,9 +53,9 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
 |             Vector Store (ChromaDB)               |
 |               (data/chroma_db)                    |
 |                                                   |
-| Collections:                                      |
-| - embeddings_t1_{model_name}                      |
-| - embeddings_t2_{model_name}                      |
+| Collections (per Project + Model):                |
+| - embeddings_{proj_id}_{t1}_{model}               |
+| - embeddings_{proj_id}_{t2}_{model}               |
 |                                                   |
 | Stored Data:                                      |
 | - Vector (768d float array)                       |
@@ -77,10 +80,37 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
 |                                                   |
 | 1. Query Embeddings for Target Word               |
 | 2. Dimensionality Reduction (PCA/UMAP)            |
-| 3. Clustering (HDBSCAN/KMeans) -> "Senses"        |
+| 3. Word Sense Induction (WSI)                     |
+|    (KMeans/HDBSCAN via WordSenseInductor)         |
 | 4. Neighbor Retrieval (via Vector Similarity)     |
 | 5. Interactive Plotting (Plotly)                  |
 +---------------------------------------------------+
+```
+
+## HPC Workflow
+
+For large corpora, computationally intensive tasks (Ingestion, Embedding) can be offloaded to a SLURM-based HPC cluster.
+
+```ascii
+Local Machine                          Remote HPC Cluster
++-------------+                        +------------------+
+| src/cli/hpc | --(rsync code/data)--> | Work Directory   |
+| (push)      |                        |                  |
++-------------+                        +--------+---------+
+       |                                        |
+       | (ssh sbatch)                           v
+       v                               +------------------+
++-------------+                        | SLURM Jobs       |
+| src/cli/hpc |                        | (sild_ingest)    |
+| (submit)    |                        | (sild_embed)     |
++-------------+                        +--------+---------+
+       ^                                        |
+       | (rsync results)                        v
+       |                               +------------------+
++-------------+                        | Output Data      |
+| src/cli/hpc | <--(pull DBs/Chroma)-- | (data/...)       |
+| (pull)      |                        |                  |
++-------------+                        +------------------+
 ```
 
 ## Component Details
@@ -104,12 +134,23 @@ The SILD (Semantic Change Analysis) system allows users to analyze how the meani
 - **Output**: A CSV file listing words sorted by their semantic shift score, helping users identify interesting candidates for deep analysis.
 
 ### 4. Analysis Core (`src/main.py`)
-- **Purpose**: Performs the actual Word Sense Induction (WSI).
+- **Purpose**: Performs the actual Word Sense Induction (WSI) for a single target word.
+- **Key Components**:
+    - **Project Manager (`src/semantic_change/project_manager.py`)**: Handles project metadata, ensuring analysis runs on the correct databases and time periods.
+    - **Word Sense Inductor (`src/semantic_change/wsi.py`)**: A facade for clustering algorithms (KMeans, Spectral, HDBSCAN).
+    - **Visualizer**: Generates Plotly HTML charts.
 - **Process**:
     - Fetches embeddings for the target word from ChromaDB.
-    - Clusters them to find distinct senses (e.g., "bank" -> [river bank, financial bank]).
-    - Visualizes the distribution over time.
-    - **Semantic Neighbors**: Finds the closest *other* words in the vector space to describe each sense cluster. It uses iterative querying of ChromaDB to ensure a diverse set of real-word neighbors.
+    - Reduces dimensionality (PCA/UMAP) for visualization and/or clustering.
+    - Clusters embeddings to find distinct senses.
+    - **Semantic Neighbors**: Finds the closest *other* words in the vector space to describe each sense cluster using iterative ChromaDB querying.
+
+### 5. HPC Integration (`src/cli/hpc.py`, `src/hpc/`)
+- **Purpose**: Manages the lifecycle of remote jobs.
+- **Capabilities**:
+    - **Push**: Syncs code and raw data to the configured remote host.
+    - **Submit**: Generates SLURM scripts on the fly and submits them via SSH.
+    - **Pull**: Retrieves generated SQLite databases and ChromaDB vector stores back to the local machine for analysis.
 
 ## Directory Structure
 
@@ -118,22 +159,34 @@ project_root/
 ├── data/                   # Generated artifacts (DBs, Embeddings)
 │   ├── corpus_t1.db        # SQLite DB for Period 1
 │   ├── corpus_t2.db        # SQLite DB for Period 2
+│   ├── projects.json       # Project metadata registry
 │   └── chroma_db/          # Vector Store
 ├── data_source/            # Input Raw Text
 │   ├── t1/                 # Text files for Period 1
 │   └── t2/                 # Text files for Period 2
 ├── output/                 # Visualization HTMLs & Reports
 └── src/                    # Source Code
+    ├── check_gpu.py        # Utility to verify GPU availability
+    ├── clean_corpus.py     # Utility to clean Gutenberg headers/footers
     ├── gui_app.py          # Streamlit Dashboard
     ├── main.py             # Analysis Logic (Single Word)
     ├── rank_semantic_change.py # Semantic Shift Ranking
     ├── run_ingest.py       # Corpus Ingestion
+    ├── cli/                # Command Line Interfaces
+    │   └── hpc.py          # HPC management CLI
+    ├── hpc/                # HPC Support Modules
+    │   ├── config.py       # HPC Configuration
+    │   ├── slurm.py        # SLURM script generation
+    │   └── sync.py         # Rsync wrappers
     └── semantic_change/    # Core Modules
         ├── computing_semantic_change.py # Shared logic for distance calc
         ├── corpus.py       # DB Interface
         ├── embedding.py    # LLM Wrapper
         ├── embeddings_generation.py # Batch Embedding Script
         ├── ingestor.py     # Spacy Processing
+        ├── project_manager.py # Project Metadata Management
+        ├── reporting.py    # Report Generation
         ├── vector_store.py # ChromaDB Wrapper
-        └── visualization.py # Plotly Charts
+        ├── visualization.py # Plotly Charts
+        └── wsi.py          # Word Sense Induction Algorithms
 ```

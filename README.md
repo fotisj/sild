@@ -54,25 +54,20 @@ If you are new to Python, follow these steps to get started:
     uv pip install -r requirements.txt
     ```
 
-3.  **Download spaCy Model:** The ingestion and neighbor filtering steps use a spaCy model.
-    ```bash
-    python -m spacy download en_core_web_sm
-    ```
-
 ## Usage
 
 ### 1. Ingest Your Corpora
 
 Place your raw text files for each time period into separate directories, for example:
-- `data_gutenberg/1800/`
-- `data_gutenberg/1900/`
+- `data_source/t1/`
+- `data_source/t2/`
 
 Then, run the ingestion script:
 
 ```bash
-python run_ingest.py --input-dir-1800 data_gutenberg/1800 --input-dir-1900 data_gutenberg/1900
+uv run python src/run_ingest.py --input-t1 data_source/t1 --input-t2 data_source/t2 --label-t1 1800 --label-t2 1900
 ```
-This will create `data/ingested_1800.db` and `data/ingested_1900.db`. You only need to do this once.
+This will create `data/corpus_t1.db` and `data/corpus_t2.db`. You only need to do this once.
 
 ### 2. Launch the GUI
 
@@ -95,17 +90,26 @@ You can also run analyses directly from the command line:
 **Step 1: Batch Embedding Generation**
 Pre-compute embeddings for frequent words.
 ```bash
-python -m src.semantic_change.embeddings_generation --model bert-base-uncased --max-samples 200
+uv run python -m src.semantic_change.embeddings_generation --model bert-base-uncased --max-samples 200
 ```
 
 **Step 2: Rank Semantic Change**
 Calculate the shift for all shared words to find the most interesting ones.
 ```bash
-python src/rank_semantic_change.py --output output/ranking.csv
+uv run python src/rank_semantic_change.py --output output/ranking.csv
 ```
 
 **Step 3: Single Word Analysis**
 Deep dive into a specific word.
 ```bash
-python main.py --word factory --model bert-base-uncased
+uv run python main.py --word factory --model bert-base-uncased
 ```
+
+## HPC Integration
+
+This project includes tools to run computationally intensive tasks (Ingestion, Embedding) on a SLURM-based HPC cluster.
+
+See `user_guide.md` for detailed instructions on:
+1.  Pushing code and data to the cluster (`src.cli.hpc push`).
+2.  Submitting jobs (`src.cli.hpc submit`).
+3.  Pulling results back to your local machine (`src.cli.hpc pull`).

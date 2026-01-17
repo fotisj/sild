@@ -36,15 +36,55 @@ https://doku.hpc.uni-wuerzburg.de/slurm-container/
 ### 4. Documentation
 - [ ] **HPC Guide**: Add `docs/hpc_guide.md` explaining how to configure the SSH connection, build the container, and manage jobs.
 
+### 5. Improvements
+- [ ] **Externalize spaCy models for HPC**:
+    - Instead of baking models into `sild.sif`, download them to a shared persistent directory (e.g., `data/models`) on the cluster.
+    - Configure the container to look for models there (via `SPACY_DATA_PATH` or symlinks).
+    - **Benefit**: Allows adding new languages without rebuilding the huge container image.
 
-## II. Refactoring BertEmbedder
+## II. Refactoring BertEmbedder & Embedding Performance Optimization
 Probably this can be done together with item one
 
-- [ ] **Lazy Load BertEmbedder Components**: 
+### 1. Lazy Loading (Quick Win)
+- [ ] **Lazy Load BertEmbedder Components**:
     - Currently, `BertEmbedder` initializes the **MLM Head** (for neighbor discovery) and the **spaCy Filter Model** (for cleaning neighbors) in its `__init__` method.
     - This happens even for Batch Analysis (Embedding Generation), where these components are not needed, causing unnecessary memory usage and startup delay.
     - **Goal**: Refactor `BertEmbedder` to load `self.mlm_model` and `self.filter_nlp` only when `get_nearest_neighbors()` is called for the first time.
     - **Benefit**: Faster startup for batch processing and reduced memory footprint.
+
+### 2. Embedding Extraction Performance Optimizations
+
+The following optimizations target `batch_extract()` in `embedding.py` and `process_corpus()` in `embeddings_generation.py`:
+
+| Optimization | Impact | Effort | Description |
+|--------------|--------|--------|-------------|
+| Mixed precision (bf16/fp16) | **High** | Low | Enable automatic mixed precision for ~2x throughput on modern GPUs (L40, A100, etc.) |
+| Skip MLM/filter model | Medium | Low | Add `skip_neighbors=True` parameter to skip loading unused components |
+| Increase batch size | Medium | Low | Current batch_size=128 is conservative for 48GB VRAM GPUs |
+| Keep tensors on GPU | Medium | Medium | In `_combine_layers()`, avoid cupy→numpy→torch conversion per document |
+| Direct HuggingFace usage | **High** | High | Replace spacy-transformers with direct transformers library, handle subword alignment manually |
+| DataLoader prefetching | Medium | Medium | Pre-tokenize next batch while current batch is on GPU |
+
+#### Recommended Priority Order:
+1. **Mixed precision (bf16)** - Highest impact, minimal code change. Add `torch.autocast('cuda', dtype=torch.bfloat16)` context manager around inference.
+2. **Skip unnecessary models** - Add parameter to `BertEmbedder.__init__()` to skip MLM/filter model loading for batch jobs.
+3. **Increase batch size** - Tune `embed_batch_size` based on available VRAM (e.g., 256-512 for L40).
+4. **GPU tensor optimization** - Refactor `_combine_layers()` to stay on GPU when using cupy arrays.
+5. **Direct HuggingFace** (long-term) - Major refactor but removes spacy-transformers overhead entirely.
+
+#### Implementation Notes:
+- Mixed precision example:
+  ```python
+  with torch.autocast('cuda', dtype=torch.bfloat16):
+      docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
+  ```
+- For skip_neighbors parameter:
+  ```python
+  def __init__(self, ..., skip_neighbors: bool = False):
+      if not skip_neighbors:
+          self.mlm_model = AutoModelForMaskedLM.from_pretrained(model_name)
+          self.filter_nlp = spacy.load(filter_model_to_load)
+  ```
 
 ### III. Refactoring: Separation of Concerns & Cleanup
 
@@ -112,27 +152,48 @@ Implement the graph-based Word Sense Induction approach based on "Large Scale Su
 
 
 ## VI. Major Feature: Add more WSI methods and measures for semantic change detection
-- [ ] **Add more measures for semantic change detection**
-  - [ ] Inverted similarity over word prototype (PRT) [73]
-  - [ ] Time-diff (TD)
-  - [ ] 
 
+### 1. Add more measures for semantic change detection (Periti & Montanelli 2024)
 
-- [ ] **Add more WSI methods** 
-     (numbers refer to the reference section in Periti, Montanelli 2024 in the subdir ./references) 
-    -  [ ] Affinity Propagation (AP)
-    -  [ ] Gaussian Mixture Models (GMMs) [118]
-    -  [ ] agglomerative clustering (AGG) (e.g., Reference [7]), 
-    -  [ ] DBSCAN (e.g., Reference [65]), 
-    -  [ ] HDBSCAN (e.g., Reference [118]) [Check this against our implementation], 
-    -  [ ] Balanced Iterative Reducing and Clustering using Hierarchies (BIRCH) (e.g., Reference [118]), 
-    -  [ ] A Posteriori affinity Propagation (APP) (e.g., Reference [105]), 
-    -  [ ] Incremental Affinity Propagation based on Nearest neighbor Assignment (IAPNA)
+**Form-based Measures (Section 4.1):**
+- [ ] **Cosine Distance (CD)** [91]: Distance between word prototypes.
+- [ ] **Inverted similarity over word prototype (PRT)** [73]: Inverse of cosine similarity.
+- [ ] **Time-diff (TD)** [116]: Average difference of predicted time probabilities.
+- [ ] **Average Pairwise Distance (APD)** [45]: Average distance between all pairs of embeddings from the two periods.
+- [ ] **Average of Average Inner Distances (APD-OLD/NEW)** [81]: Estimates change as the average degree of polysemy.
+- [ ] **Hausdorff Distance (HD)** [138]: Max-min distance between embedding sets.
+- [ ] **Difference between Token Embedding Diversities (DIV)** [72]: Absolute difference between coefficients of variation.
+- [ ] **Cosine Distance between Semantic Prototypes (PDIS)** [105]: CD between average embeddings of all sense prototypes.
+- [ ] **Difference between Prototype Embedding Diversities (PDIV)** [105]: Extension of DIV using semantic prototypes.
+
+**Sense-based Measures (Section 4.2):**
+- [ ] **Maximum Novelty Score (MNS)** [28]: Max ratio of embeddings from one period in a cluster.
+- [ ] **Maximum Square (MS)** [115]: Square difference of cluster distributions.
+- [ ] **Jensen-Shannon Divergence (JSD)** [64]: Symmetrical KL divergence between cluster distributions.
+- [ ] **Coefficient of Semantic Change (CSC)** [64]: Weighted difference of elements in clusters.
+- [ ] **Cosine Distance between Cluster Distributions (CDCD)** [7]: CD between cluster distribution vectors.
+- [ ] **Entropy Difference (ED)** [45]: Difference in entropy (uncertainty) of distributions.
+- [ ] **Average Pairwise Distance between Sense Prototypes (APDP)** [66]: APD over pairs of sense prototypes.
+- [ ] **Wasserstein Distance (WD)** [100]: Optimal transport cost to reconfigure cluster distribution.
+
+### 2. Add more WSI methods
+(numbers refer to the reference section in Periti, Montanelli 2024 in the subdir ./references) 
+- [ ] Affinity Propagation (AP)
+- [ ] Gaussian Mixture Models (GMMs) [118]
+- [ ] agglomerative clustering (AGG) (e.g., Reference [7])
+- [ ] DBSCAN (e.g., Reference [65])
+- [ ] HDBSCAN (e.g., Reference [118]) [Check this against our implementation]
+- [ ] Balanced Iterative Reducing and Clustering using Hierarchies (BIRCH) (e.g., Reference [118])
+- [ ] A Posteriori affinity Propagation (APP) (e.g., Reference [105])
+- [ ] Incremental Affinity Propagation based on Nearest neighbor Assignment (IAPNA)
 
 
 ## VII. Smaller Open Tasks
 - [ ] **Export**: Allow exporting the analysis results (cluster assignments, neighbor lists) as CSV/JSON.
-- [ ] **Cleaning up the GUI**: Separate Test gui and logic. Move the test parts in the gui (and the logic) for text ingest and embedding creation to a major page "Testing" 
+- [ ] **Cleaning up the GUI**: 
+    - Separate Test gui and logic. Move the test parts in the gui (and the logic) for text ingest and embedding creation to a major page "Testing".
+    - **Language Selection & Model Compatibility**: Add a dropdown for Language (EN, DE, etc.). Ensure the selected spaCy model matches the language to prevent runtime errors.
+- [ ] **GUI changes **: add time info for tasks like text ingest and embedding creation because they take long (similar to tqdm)
 
 
 ## VIII. Future Tasks

@@ -7,7 +7,9 @@
       "Bash(uv run:*)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(dir:*)",
+      "Bash(git tag:*)"
     ]
   }
 }

@@ -2,6 +2,8 @@
 data/
 data_source/
 data_gutenberg/
+output/
+references/
 
 # Python
 __pycache__/
@@ -16,3 +18,21 @@ __pycache__/
 
 # Temp
 *.tmp.*
+
+
+# AI
+.claude
+CLAUDE.md
+
+# HPC
+hpc/
+
+# others
+.ruff-cache/
+.ipynb_checkpoints
+*.bak
+*-cwd
+streamlit.log
+smalltest.py
+
+#I created a repo on github, https://github.com/fotisj/sild, push the project there
