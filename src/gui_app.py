@@ -16,6 +16,8 @@ import json
 import glob
 import time
 import traceback
+import zipfile
+from datetime import datetime
 
 # Ensure module path is available
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1133,6 +1135,13 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                 )
 
             st.success("Analysis Complete!")
+            # Store visualization parameters in session state for persistence
+            st.session_state['last_viz_params'] = {
+                'project_id': config["project_id"],
+                'model_name': params["model_name"],
+                'target_word': params["target_word"]
+            }
+            # Display visualizations immediately after analysis
             display_visualizations(
                 project_id=config["project_id"],
                 model_name=params["model_name"],
@@ -1233,6 +1242,58 @@ def display_visualizations(
             with open(nf, "r", encoding="utf-8") as f:
                 st.components.v1.html(f.read(), height=600, scrolling=True)
 
+    # Archive button
+    if prefix:
+        st.markdown("---")
+        if st.button("📦 Archive Results", help="Save all visualization files to a zip archive"):
+            archive_visualizations(prefix, project_id, model_name, target_word)
+
+
+def archive_visualizations(
+    prefix: str,
+    project_id: str,
+    model_name: str,
+    target_word: str
+) -> None:
+    """
+    Archive all visualization HTML files matching the prefix into a zip file.
+
+    Args:
+        prefix: The filename prefix to match
+        project_id: Project ID for the archive name
+        model_name: Model name for the archive name
+        target_word: Target word for the archive name
+    """
+    # Create archive directory if it doesn't exist
+    archive_dir = os.path.join(OUTPUT_DIR, "archive")
+    os.makedirs(archive_dir, exist_ok=True)
+
+    # Collect all HTML files matching the prefix
+    html_files = glob.glob(os.path.join(OUTPUT_DIR, f"{prefix}*.html"))
+
+    if not html_files:
+        st.warning("No visualization files found to archive.")
+        return
+
+    # Generate archive filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    from main import get_model_short_name
+    model_short = get_model_short_name(model_name)
+    archive_name = f"k{project_id}_{model_short}_{target_word}_{timestamp}.zip"
+    archive_path = os.path.join(archive_dir, archive_name)
+
+    # Create zip file
+    try:
+        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for html_file in html_files:
+                # Add file with just the basename (no directory structure)
+                arcname = os.path.basename(html_file)
+                zipf.write(html_file, arcname)
+
+        st.success(f"Archived {len(html_files)} files to `{archive_path}`")
+    except Exception as e:
+        st.error(f"Failed to create archive: {e}")
+
 
 def render_dashboard_page(
     config: dict,
@@ -1269,6 +1330,15 @@ def render_dashboard_page(
         if run_btn:
             save_config(config)
             run_analysis(config, params, db_t1, db_t2, period_t1_label, period_t2_label)
+
+        # Display visualizations if we have stored parameters (persists across reruns)
+        elif 'last_viz_params' in st.session_state:
+            viz_params = st.session_state['last_viz_params']
+            display_visualizations(
+                project_id=viz_params['project_id'],
+                model_name=viz_params['model_name'],
+                target_word=viz_params['target_word']
+            )
 
 
 # =============================================================================
