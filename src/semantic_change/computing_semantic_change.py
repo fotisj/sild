@@ -43,22 +43,22 @@ def compute_semantic_change_centroid_distance(
         The cosine distance between the two period centroids, or None if
         embeddings could not be retrieved for one or both periods.
     """
-    # Query embeddings for period 1
+    # Query embeddings for period 1 (case-sensitive to support cased models)
     if pos:
-        where_clause_t1 = {"$and": [{"lemma": lemma.lower()}, {"pos": pos}]}
+        where_clause_t1 = {"$and": [{"lemma": lemma}, {"pos": pos}]}
     else:
-        where_clause_t1 = {"lemma": lemma.lower()}
+        where_clause_t1 = {"lemma": lemma}
 
     results_t1 = vector_store.get_by_metadata(
         collection_name_t1, where=where_clause_t1, limit=100000
     )
     embeddings_t1 = results_t1.get("embeddings", [])
 
-    # Query embeddings for period 2
+    # Query embeddings for period 2 (case-sensitive to support cased models)
     if pos:
-        where_clause_t2 = {"$and": [{"lemma": lemma.lower()}, {"pos": pos}]}
+        where_clause_t2 = {"$and": [{"lemma": lemma}, {"pos": pos}]}
     else:
-        where_clause_t2 = {"lemma": lemma.lower()}
+        where_clause_t2 = {"lemma": lemma}
 
     results_t2 = vector_store.get_by_metadata(
         collection_name_t2, where=where_clause_t2, limit=100000

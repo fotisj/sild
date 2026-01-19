@@ -181,6 +181,23 @@ Implement the graph-based Word Sense Induction approach based on "Large Scale Su
 
 
 ## VII. Smaller Open Tasks
+
+- [ ] **Resume Embedding Generation**: Add ability to interrupt and resume embedding generation:
+    - Query ChromaDB at startup to get list of lemmas that already have embeddings
+    - Skip already-processed lemmas when collecting sentences
+    - Add `--resume` CLI flag (default behavior) and `--reset` to start fresh
+    - Display progress: "Skipping N already-processed words, processing M remaining"
+    - **Benefit**: Allows interrupting long batch jobs and resuming without losing progress
+
+- [ ] **Configurable ChromaDB Path**: Allow storing ChromaDB outside the project directory:
+    - Add `chroma_db_path` to `config.json`
+    - Useful when project is in a synced folder (Dropbox, OneDrive) to avoid I/O contention
+    - Default: `data/chroma_db` (current behavior)
+
+- [ ] **Reduce stqdm Threading Warnings**: The `ThreadPoolExecutor` in `process_corpus()` causes "missing ScriptRunContext" warnings when using `stqdm`. Options:
+    - Use regular `tqdm` for the thread pool progress (only affects internal logging)
+    - Or remove async writes when disk I/O is the bottleneck anyway
+
 - [ ] **Export**: Allow exporting the analysis results (cluster assignments, neighbor lists) as CSV/JSON.
 - [ ] **Cleaning up the GUI**:
     - Separate Test gui and logic. Move the test parts in the gui (and the logic) for text ingest and embedding creation to a major page "Testing".

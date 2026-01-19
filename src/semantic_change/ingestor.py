@@ -164,7 +164,7 @@ class Ingestor:
                 if token.is_space:
                     continue
                     
-                lemma = token.lemma_.lower()
+                lemma = token.lemma_
                 pos = token.pos_
                 
                 # Calculate relative offset

@@ -9,7 +9,8 @@
       "WebFetch(domain:github.com)",
       "Bash(sqlite3:*)",
       "Bash(dir:*)",
-      "Bash(git tag:*)"
+      "Bash(git tag:*)",
+      "Bash(git push:*)"
     ]
   }
 }

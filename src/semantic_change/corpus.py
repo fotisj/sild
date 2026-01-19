@@ -146,22 +146,21 @@ class Corpus:
             print("Error: No ingested database found. Please ingest the corpus first.")
             return []
 
-        word_lower = word.lower()
         cursor = self.conn.cursor()
 
         # We need the sentence text, the specific token form, its start offset, and file info
         # Use exact token match or lemma match based on exact_match flag
         if exact_match:
-            # Search by exact token form (case-insensitive using LOWER)
+            # Search by exact token form (case-sensitive)
             query = """
                 SELECT s.text, t.text, t.start_char, s.id, s.file_offset_start, f.filepath, t.lemma
                 FROM tokens t
                 JOIN sentences s ON t.sentence_id = s.id
                 JOIN files f ON s.file_id = f.id
-                WHERE LOWER(t.text) = ?
+                WHERE t.text = ?
             """
         else:
-            # Search by lemma (original behavior)
+            # Search by lemma (case-sensitive to support cased models)
             query = """
                 SELECT s.text, t.text, t.start_char, s.id, s.file_offset_start, f.filepath, t.lemma
                 FROM tokens t
@@ -169,7 +168,7 @@ class Corpus:
                 JOIN files f ON s.file_id = f.id
                 WHERE t.lemma = ?
             """
-        params = [word_lower]
+        params = [word]
         
         if pos_filter:
             query += " AND t.pos = ?"

@@ -332,24 +332,22 @@ def fetch_embeddings_from_store(
     if context_window > 0:
         return None
 
-    word_lower = target_word.lower()
     use_strict_query = pos_filter and pos_filter != 'NOUN'
 
     # Build where clause based on exact_match and pos_filter
+    # Case is preserved to support cased models (e.g., German BERT)
     if exact_match:
-        # Search by exact token form (case-insensitive)
-        # Note: ChromaDB metadata queries are case-sensitive, so we query by lowercased token
-        # For embeddings without 'token' field (legacy), fall back to lemma
+        # Search by exact token form (case-sensitive)
         if use_strict_query:
             where_clause = {"$and": [{"token": target_word}, {"pos": pos_filter}]}
         else:
             where_clause = {"token": target_word}
     else:
-        # Search by lemma (original behavior)
+        # Search by lemma (case-sensitive)
         if use_strict_query:
-            where_clause = {"$and": [{"lemma": word_lower}, {"pos": pos_filter}]}
+            where_clause = {"$and": [{"lemma": target_word}, {"pos": pos_filter}]}
         else:
-            where_clause = {"lemma": word_lower}
+            where_clause = {"lemma": target_word}
 
     limit_request = n_samples * 2 if not use_strict_query else n_samples
 
@@ -679,7 +677,7 @@ def get_chroma_neighbors(
     """
     skip_lemmas = set()
     if target_word:
-        skip_lemmas.add(target_word.lower())
+        skip_lemmas.add(target_word)
 
     try:
         results = vector_store.query(
@@ -711,7 +709,7 @@ def get_chroma_neighbors(
     lemma_ids = defaultdict(list)
 
     for i, m in enumerate(metas):
-        lemma = m.get('lemma', '').lower()
+        lemma = m.get('lemma', '')
         if not lemma or len(lemma) < 2:
             continue
         if lemma in skip_lemmas:

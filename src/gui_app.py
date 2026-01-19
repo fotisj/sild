@@ -590,7 +590,8 @@ def run_batch_embedding_process(
     max_samples: int = 200,
     pooling_strategy: str = "mean",
     layers: list[int] = None,
-    layer_op: str = "mean"
+    layer_op: str = "mean",
+    staged: bool = False
 ) -> None:
     """Executes the batch embedding generation process."""
     if layers is None:
@@ -625,6 +626,7 @@ def run_batch_embedding_process(
                 pooling_strategy=pooling_strategy,
                 layers=layers,
                 layer_op=layer_op,
+                staged=staged,
             )
         status_container.success("Batch Processing Complete!")
     except Exception as e:
@@ -673,6 +675,15 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
         help="For testing: 25 shared nouns, min freq 50, 50 embeddings per word per period"
     )
 
+    # Staged mode option for faster processing
+    staged_mode = st.checkbox(
+        "Staged mode (faster)",
+        value=True,
+        help="Write embeddings to NPZ files first, then bulk import to ChromaDB. "
+             "Significantly faster for large batches due to reduced I/O overhead. "
+             "Also enables resume capability if interrupted."
+    )
+
     st.markdown("#### Advanced Model Config")
     render_layer_config(config)
 
@@ -705,7 +716,8 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
         run_batch_embedding_process(
             config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
             test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy,
-            layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean")
+            layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean"),
+            staged=staged_mode
         )
 
 

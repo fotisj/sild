@@ -1,7 +1,7 @@
 {
     "data_dir": "data",
-    "model_name": "google_bert_bert_base_german_cased",
-    "target_word": "licht",
+    "model_name": "google-bert/bert-base-german-cased",
+    "target_word": "H\u00f6lle",
     "k_neighbors": 10,
     "min_cluster_size": 2,
     "n_clusters": 2,
@@ -14,20 +14,20 @@
     "viz_max_instances": 50,
     "input_dir_1800": "data_gutenberg/1800",
     "input_dir_1900": "data_gutenberg/1900",
-    "spacy_model": "de_dep_news_trf",
+    "spacy_model": "de_core_news_md",
     "layers": [
         -1,
         -2,
         -3,
         -4
     ],
-    "layer_op": "mean",
+    "layer_op": "median",
     "min_freq": 25,
     "lang": "en",
     "context_window": 0,
     "clustering_reduction": "None",
     "clustering_n_components": 30,
-    "viz_reduction": "pca",
+    "viz_reduction": "umap",
     "input_dir_t1": "data_source/t1",
     "input_dir_t2": "data_source/t2",
     "period_t1_label": "1670-1760",
@@ -36,7 +36,10 @@
     "k_per_sentence": 6,
     "m_final": 10,
     "file_encoding": "cp1252",
-    "max_files": 25,
+    "max_files": null,
     "batch_max_samples": 100,
-    "project_id": "6569"
+    "project_id": "6569",
+    "exact_match": false,
+    "pooling_strategy": "lemma_replacement",
+    "wsi_enabled": false
 }
