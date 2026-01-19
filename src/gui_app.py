@@ -213,7 +213,7 @@ def render_navigation() -> str:
     st.sidebar.title("Navigation")
     return st.sidebar.radio(
         "Go to",
-        ["Analysis Dashboard", "Data Ingestion", "Embeddings & Models", "Corpus Reports"],
+        ["Semantic Change Analysis", "Data Ingestion", "Embeddings & Models", "Corpus Reports"],
     )
 
 
@@ -1009,33 +1009,13 @@ def display_existing_report() -> None:
 
 
 # =============================================================================
-# Analysis Dashboard Page
+# Semantic Change Analysis Page
 # =============================================================================
 
-def render_dashboard_parameters(config: dict, available_models: list[str]) -> dict:
-    """Renders the parameter inputs for the dashboard and returns selected values."""
+def render_search_parameters(config: dict) -> dict:
+    """Renders the Search section parameters."""
     params = {}
-
-    # Model selection
-    selected_safe_model = st.selectbox(
-        "Select Embedding Set",
-        available_models,
-        index=0 if available_models else None,
-        help="Select the pre-computed embeddings to use.",
-    )
-    params["selected_safe_model"] = selected_safe_model
-
-    st.info(f"Using embeddings from: {selected_safe_model}")
-
-    # Derive a likely model name from the safe model name for the tokenizer
-    # Convert safe name back: LSX_UniWue_ModernGBERT_1B -> LSX-UniWue/ModernGBERT-1B (approximate)
-    # Use the selected safe model as default, user can override if needed
-    default_model = selected_safe_model if selected_safe_model else config["model_name"]
-    params["model_name"] = st.text_input(
-        "Model ID (for Tokenizer, usually auto-detected)",
-        value=default_model,
-        help="The HuggingFace model ID used for tokenization. Usually matches the embedding set.",
-    )
+    st.markdown("#### Search")
 
     # Target word input
     params["target_word"] = st.text_input("Target Word", value=config["target_word"])
@@ -1063,62 +1043,106 @@ def render_dashboard_parameters(config: dict, available_models: list[str]) -> di
     return params
 
 
-def render_clustering_parameters(config: dict) -> dict:
-    """Renders clustering algorithm parameters."""
+def render_embedding_parameters(config: dict, available_models: list[str]) -> dict:
+    """Renders the Embedding section parameters."""
     params = {}
+    st.markdown("#### Embedding")
 
-    wsi_options = ["hdbscan", "kmeans", "spectral", "agglomerative"]
-    params["wsi_algorithm"] = st.selectbox(
-        "Clustering Algorithm",
-        options=wsi_options,
-        index=wsi_options.index(config["wsi_algorithm"]),
+    # Model selection
+    selected_safe_model = st.selectbox(
+        "Select Embedding Set",
+        available_models,
+        index=0 if available_models else None,
+        help="Select the pre-computed embeddings to use.",
+    )
+    params["selected_safe_model"] = selected_safe_model
+
+    st.info(f"Using embeddings from: {selected_safe_model}")
+
+    # Derive a likely model name from the safe model name for the tokenizer
+    default_model = selected_safe_model if selected_safe_model else config["model_name"]
+    params["model_name"] = st.text_input(
+        "Model ID (for Tokenizer)",
+        value=default_model,
+        help="The HuggingFace model ID used for tokenization. Usually matches the embedding set.",
     )
 
-    if params["wsi_algorithm"] == "hdbscan":
-        params["min_cluster_size"] = st.number_input(
-            "Min Cluster Size",
-            min_value=2,
-            value=config["min_cluster_size"],
+    return params
+
+
+def render_wsi_parameters(config: dict) -> dict:
+    """Renders the Word Sense Induction section parameters."""
+    params = {}
+    st.markdown("#### Word Sense Induction")
+
+    # WSI enable checkbox (default: yes)
+    params["wsi_enabled"] = st.checkbox(
+        "Enable Word Sense Induction",
+        value=config.get("wsi_enabled", True),
+        help="If enabled, cluster word usages into sense groups. If disabled, all usages are treated as one sense."
+    )
+
+    if params["wsi_enabled"]:
+        # Pre-clustering reduction
+        clust_options = ["None", "pca", "umap", "tsne"]
+        current_clust = config.get("clustering_reduction", "None")
+        if current_clust not in clust_options:
+            current_clust = "None"
+
+        params["clustering_reduction"] = st.selectbox(
+            "Pre-clustering Reduction",
+            options=clust_options,
+            index=clust_options.index(current_clust),
+            help="Reduce dimensions before clustering. Helps with high-dim embeddings (~768d).",
         )
-        params["n_clusters"] = config["n_clusters"]
+
+        if params["clustering_reduction"] != "None":
+            params["clustering_n_components"] = st.number_input(
+                "Clustering Reduction Dims",
+                min_value=2,
+                max_value=200,
+                value=config.get("clustering_n_components", 50),
+            )
+        else:
+            params["clustering_n_components"] = config.get("clustering_n_components", 50)
+
+        # Clustering algorithm
+        wsi_options = ["hdbscan", "kmeans", "spectral", "agglomerative"]
+        params["wsi_algorithm"] = st.selectbox(
+            "Clustering Algorithm",
+            options=wsi_options,
+            index=wsi_options.index(config["wsi_algorithm"]),
+        )
+
+        if params["wsi_algorithm"] == "hdbscan":
+            params["min_cluster_size"] = st.number_input(
+                "Min Cluster Size",
+                min_value=2,
+                value=config["min_cluster_size"],
+            )
+            params["n_clusters"] = config["n_clusters"]
+        else:
+            params["n_clusters"] = st.number_input(
+                "Number of Clusters (k)",
+                min_value=2,
+                value=config["n_clusters"],
+            )
+            params["min_cluster_size"] = config["min_cluster_size"]
     else:
-        params["n_clusters"] = st.number_input(
-            "Number of Clusters (k)",
-            min_value=2,
-            value=config["n_clusters"],
-        )
+        # Set default values when WSI is disabled
+        params["clustering_reduction"] = config.get("clustering_reduction", "None")
+        params["clustering_n_components"] = config.get("clustering_n_components", 50)
+        params["wsi_algorithm"] = config["wsi_algorithm"]
+        params["n_clusters"] = config["n_clusters"]
         params["min_cluster_size"] = config["min_cluster_size"]
 
     return params
 
 
-def render_reduction_parameters(config: dict) -> dict:
-    """Renders dimensionality reduction parameters."""
+def render_visualization_parameters(config: dict) -> dict:
+    """Renders the Visualization section parameters."""
     params = {}
-    st.markdown("##### Dimensionality Reduction")
-
-    # Pre-clustering reduction
-    clust_options = ["None", "pca", "umap", "tsne"]
-    current_clust = config.get("clustering_reduction", "None")
-    if current_clust not in clust_options:
-        current_clust = "None"
-
-    params["clustering_reduction"] = st.selectbox(
-        "Pre-clustering Reduction",
-        options=clust_options,
-        index=clust_options.index(current_clust),
-        help="Reduce dimensions before clustering. Helps with high-dim embeddings (~768d).",
-    )
-
-    if params["clustering_reduction"] != "None":
-        params["clustering_n_components"] = st.number_input(
-            "Clustering Reduction Dims",
-            min_value=2,
-            max_value=200,
-            value=config.get("clustering_n_components", 50),
-        )
-    else:
-        params["clustering_n_components"] = config.get("clustering_n_components", 50)
+    st.markdown("#### Visualization")
 
     # Visualization reduction
     viz_options = ["pca", "umap", "tsne"]
@@ -1133,15 +1157,9 @@ def render_reduction_parameters(config: dict) -> dict:
         help="Method to reduce to 2D for plotting.",
     )
 
-    return params
-
-
-def render_neighbor_parameters(config: dict) -> dict:
-    """Renders semantic neighbor parameters."""
-    params = {}
-
+    # Semantic neighbors
     params["k_neighbors"] = st.number_input(
-        "Neighbors (k)",
+        "Semantic Neighbors (k)",
         min_value=1,
         value=config["k_neighbors"],
     )
@@ -1154,6 +1172,8 @@ def update_config_from_params(config: dict, params: dict) -> None:
     config["target_word"] = params.get("target_word", config["target_word"])
     config["pos_filter"] = params.get("pos_filter", config["pos_filter"])
     config["n_samples"] = params.get("n_samples", config["n_samples"])
+    config["model_name"] = params.get("model_name", config["model_name"])
+    config["wsi_enabled"] = params.get("wsi_enabled", config.get("wsi_enabled", True))
     config["wsi_algorithm"] = params.get("wsi_algorithm", config["wsi_algorithm"])
     config["min_cluster_size"] = params.get("min_cluster_size", config["min_cluster_size"])
     config["n_clusters"] = params.get("n_clusters", config["n_clusters"])
@@ -1161,7 +1181,6 @@ def update_config_from_params(config: dict, params: dict) -> None:
     config["clustering_n_components"] = params.get("clustering_n_components", config["clustering_n_components"])
     config["viz_reduction"] = params.get("viz_reduction", config["viz_reduction"])
     config["k_neighbors"] = params.get("k_neighbors", config["k_neighbors"])
-    config["model_name"] = params.get("model_name", config["model_name"])
 
 
 def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_label: str, period_t2_label: str) -> None:
@@ -1192,6 +1211,7 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                     k_neighbors=params["k_neighbors"],
                     min_cluster_size=params["min_cluster_size"],
                     n_clusters=params["n_clusters"],
+                    wsi_enabled=params.get("wsi_enabled", True),
                     wsi_algorithm=params["wsi_algorithm"],
                     pos_filter=pos_filter,
                     clustering_reduction=clust_red,
@@ -1369,8 +1389,8 @@ def render_dashboard_page(
     period_t1_label: str, period_t2_label: str,
     dbs_exist: bool
 ) -> None:
-    """Renders the Analysis Dashboard page."""
-    st.title("🔎 Semantic Analysis")
+    """Renders the Semantic Change Analysis page."""
+    st.title("🔎 Semantic Change Analysis")
 
     if not dbs_exist:
         st.error("Databases missing. Please go to 'Data Ingestion' first.")
@@ -1386,10 +1406,10 @@ def render_dashboard_page(
 
     with col1:
         st.subheader("Parameters")
-        params = render_dashboard_parameters(config, available_models)
-        params.update(render_clustering_parameters(config))
-        params.update(render_reduction_parameters(config))
-        params.update(render_neighbor_parameters(config))
+        params = render_search_parameters(config)
+        params.update(render_embedding_parameters(config, available_models))
+        params.update(render_wsi_parameters(config))
+        params.update(render_visualization_parameters(config))
 
         update_config_from_params(config, params)
         run_btn = st.button("Run Analysis", type="primary")
@@ -1443,7 +1463,7 @@ def main():
         render_embeddings_page(config, db_t1, db_t2)
     elif page == "Corpus Reports":
         render_reports_page(config, db_t1, db_t2, period_t1_label, period_t2_label, dbs_exist)
-    elif page == "Analysis Dashboard":
+    elif page == "Semantic Change Analysis":
         render_dashboard_page(config, db_t1, db_t2, period_t1_label, period_t2_label, dbs_exist)
 
 

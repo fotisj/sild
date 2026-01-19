@@ -38,6 +38,7 @@ class AnalysisConfig:
     k_neighbors: int = 10
     min_cluster_size: int = 3
     n_clusters: int = 3
+    wsi_enabled: bool = True  # If False, skip WSI clustering (all usages treated as one sense)
     wsi_algorithm: str = "hdbscan"
     pos_filter: Optional[str] = None
     clustering_reduction: Optional[str] = None
@@ -947,6 +948,7 @@ def run_single_analysis(
     k_neighbors: int = 10,
     min_cluster_size: int = 3,
     n_clusters: int = 3,
+    wsi_enabled: bool = True,
     wsi_algorithm: str = "hdbscan",
     pos_filter: Optional[str] = None,
     clustering_reduction: Optional[str] = None,
@@ -996,6 +998,7 @@ def run_single_analysis(
         k_neighbors=k_neighbors,
         min_cluster_size=min_cluster_size,
         n_clusters=n_clusters,
+        wsi_enabled=wsi_enabled,
         wsi_algorithm=wsi_algorithm,
         pos_filter=pos_filter,
         clustering_reduction=clustering_reduction,
@@ -1083,25 +1086,30 @@ def run_single_analysis(
     # Step 3: Combine embeddings
     combined = combine_embedding_data(data_t1, data_t2)
 
-    # Step 4: Pre-clustering dimensionality reduction
-    if config.clustering_reduction:
-        print(f"--- Pre-clustering Reduction: {config.clustering_reduction.upper()} "
-              f"(n={config.clustering_n_components}) ---")
+    # Step 4 & 5: WSI clustering (if enabled)
+    if config.wsi_enabled:
+        # Pre-clustering dimensionality reduction
+        if config.clustering_reduction:
+            print(f"--- Pre-clustering Reduction: {config.clustering_reduction.upper()} "
+                  f"(n={config.clustering_n_components}) ---")
 
-    clustering_embeddings = apply_dimensionality_reduction(
-        combined.embeddings,
-        config.clustering_reduction,
-        config.clustering_n_components
-    )
+        clustering_embeddings = apply_dimensionality_reduction(
+            combined.embeddings,
+            config.clustering_reduction,
+            config.clustering_n_components
+        )
 
-    # Step 5: Run clustering
-    print(f"--- Running WSI ({config.wsi_algorithm.upper()}) ---")
-    sense_labels = run_word_sense_induction(
-        clustering_embeddings,
-        config.wsi_algorithm,
-        config.min_cluster_size,
-        config.n_clusters
-    )
+        # Run clustering
+        print(f"--- Running WSI ({config.wsi_algorithm.upper()}) ---")
+        sense_labels = run_word_sense_induction(
+            clustering_embeddings,
+            config.wsi_algorithm,
+            config.min_cluster_size,
+            config.n_clusters
+        )
+    else:
+        print("--- WSI disabled: treating all usages as single sense ---")
+        sense_labels = np.zeros(len(combined.embeddings), dtype=int)
 
     # Step 6: Prepare visualization data
     print(f"--- Visualizing (reduction: {config.viz_reduction.upper()}) ---")
