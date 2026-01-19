@@ -591,14 +591,16 @@ def run_batch_embedding_process(
     pooling_strategy: str = "mean",
     layers: list[int] = None,
     layer_op: str = "mean",
-    staged: bool = False
+    staged: bool = False,
+    resume: bool = False
 ) -> None:
     """Executes the batch embedding generation process."""
     if layers is None:
         layers = [-1]
     status_container = st.empty()
     layers_str = ",".join(str(l) for l in layers)
-    status_container.info(f"Starting embedding generation for {model_name} (pooling: {pooling_strategy}, layers: [{layers_str}], layer_op: {layer_op})...")
+    action_str = "Resuming" if resume else "Starting"
+    status_container.info(f"{action_str} embedding generation for {model_name} (pooling: {pooling_strategy}, layers: [{layers_str}], layer_op: {layer_op})...")
 
     log_container = st.empty()
     logs = []
@@ -620,13 +622,14 @@ def run_batch_embedding_process(
                 min_freq=min_freq,
                 max_samples=max_samples,
                 additional_words=custom_words,
-                reset_collections=True,
+                reset_collections=not resume,  # Do not reset if resuming
                 test_mode=test_mode,
                 tqdm_class=stqdm,
                 pooling_strategy=pooling_strategy,
                 layers=layers,
                 layer_op=layer_op,
                 staged=staged,
+                resume=resume
             )
         status_container.success("Batch Processing Complete!")
     except Exception as e:
@@ -706,19 +709,41 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
     )
     config["pooling_strategy"] = pooling_strategy
 
-    if st.button("Start Batch Process", type="primary"):
-        save_config(config)
-        custom_words = []
-        if custom_words_input:
-            raw_words = custom_words_input.replace("\n", ",").split(",")
-            custom_words = [w.strip() for w in raw_words if w.strip()]
+    col_start, col_resume = st.columns([1, 1])
+    
+    with col_start:
+        if st.button("Start Batch Process", type="primary"):
+            save_config(config)
+            custom_words = []
+            if custom_words_input:
+                raw_words = custom_words_input.replace("\n", ",").split(",")
+                custom_words = [w.strip() for w in raw_words if w.strip()]
 
-        run_batch_embedding_process(
-            config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
-            test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy,
-            layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean"),
-            staged=staged_mode
-        )
+            run_batch_embedding_process(
+                config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
+                test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy,
+                layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean"),
+                staged=staged_mode,
+                resume=False
+            )
+
+    with col_resume:
+        # Only show resume if staged mode is enabled (as resume depends on staging)
+        if staged_mode:
+            if st.button("Resume Batch Process", help="Resume interrupted processing from staged files."):
+                save_config(config)
+                custom_words = []
+                if custom_words_input:
+                    raw_words = custom_words_input.replace("\n", ",").split(",")
+                    custom_words = [w.strip() for w in raw_words if w.strip()]
+
+                run_batch_embedding_process(
+                    config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
+                    test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy,
+                    layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean"),
+                    staged=staged_mode,
+                    resume=True
+                )
 
 
 def render_manage_embeddings_tab(project_id: str) -> None:

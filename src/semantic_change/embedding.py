@@ -437,7 +437,13 @@ class BertEmbedder(Embedder):
             items = self._preprocess_for_lemma_replacement(items)
 
         # We process in batches to leverage GPU
+        total_batches = (len(items) + batch_size - 1) // batch_size
+        print(f"    [DEBUG] Starting batch_extract for {len(items)} items in {total_batches} batches (batch_size={batch_size})...")
+        
         for i in range(0, len(items), batch_size):
+            if i % (batch_size * 5) == 0: # Print every 5th batch to avoid spam
+                print(f"    [DEBUG] Processing internal batch {i // batch_size + 1}/{total_batches}...")
+                
             batch_items = items[i : i + batch_size]
             batch_texts = [x['text'] for x in batch_items]
             batch_targets = [x['targets'] for x in batch_items]

@@ -15,6 +15,9 @@ from .corpus import get_spacy_model_from_db
 from tqdm import tqdm
 from tqdm.std import tqdm as tqdm_std
 
+# Disable tokenizer parallelism to avoid deadlocks on Windows
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # Default staging directory for NPZ files
 DEFAULT_STAGING_DIR = "data/embedding_staging"
 
@@ -246,38 +249,99 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
 def process_corpus_staged(db_path: str, collection_name: str, target_words: List[str],
                           embedder: BertEmbedder, staging_dir: str, max_samples: int = 200,
                           pos_filter: Union[str, List[str], Tuple[str, ...]] = ('NOUN', 'VERB', 'ADJ', 'ADV'),
-                          embed_batch_size: int = None, tqdm_class: Type[tqdm_std] = tqdm) -> int:
+                          embed_batch_size: int = None, tqdm_class: Type[tqdm_std] = tqdm,
+                          resume: bool = False) -> int:
     """
     Process corpus and write embeddings to NPZ files instead of ChromaDB.
     This is much faster than direct ChromaDB writes due to sequential I/O.
+    
+    Args:
+        resume: If True, try to resume from existing staged files and plan.
 
     Returns the number of embeddings written.
     """
-    batch_items = collect_sentences_for_words(db_path, target_words, max_samples=max_samples,
-                                               pos_filter=pos_filter, tqdm_class=tqdm_class)
+    # Create staging directory for this collection
+    collection_staging_dir = os.path.join(staging_dir, collection_name)
+    os.makedirs(collection_staging_dir, exist_ok=True)
+    
+    plan_path = os.path.join(collection_staging_dir, "batch_plan.json")
+    manifest_path = os.path.join(collection_staging_dir, "manifest.json")
+    
+    batch_items = None
+    
+    if resume:
+        if os.path.exists(manifest_path):
+            print(f"Collection {collection_name} already completed (manifest found). Skipping.")
+            try:
+                with open(manifest_path, 'r') as f:
+                    return json.load(f).get('total_embeddings', 0)
+            except:
+                return 0
+
+        if os.path.exists(plan_path):
+            print(f"  Resuming from plan: {plan_path}")
+            try:
+                with open(plan_path, 'r') as f:
+                    batch_items = json.load(f)
+            except Exception as e:
+                print(f"  Failed to load plan: {e}. Starting fresh.")
+                batch_items = None
+
+    if batch_items is None:
+        batch_items = collect_sentences_for_words(db_path, target_words, max_samples=max_samples,
+                                                   pos_filter=pos_filter, tqdm_class=tqdm_class)
+        # Save plan for potential resume
+        with open(plan_path, 'w') as f:
+            json.dump(batch_items, f)
+
     total_sents = len(batch_items)
     if total_sents == 0:
         print(f"No sentences found for {os.path.basename(db_path)}.")
         return 0
-
-    # Create staging directory for this collection
-    collection_staging_dir = os.path.join(staging_dir, collection_name)
-    os.makedirs(collection_staging_dir, exist_ok=True)
 
     # Larger chunk size for NPZ - we can afford bigger batches since writes are fast
     chunk_size = 500
     if embed_batch_size is None:
         embed_batch_size = detect_optimal_batch_size()
         print(f"  Auto-detected embedding batch size: {embed_batch_size}")
+    else:
+        print(f"  Using specified embedding batch size: {embed_batch_size}")
 
     desc = f"Processing {os.path.basename(db_path)} -> NPZ"
     total_written = 0
     chunk_idx = 0
+    start_item_idx = 0
 
-    with tqdm_class(total=total_sents, desc=desc) as pbar:
-        for i in range(0, total_sents, chunk_size):
+    # Calculate resume position
+    if resume:
+        existing_chunks = sorted(globlib.glob(os.path.join(collection_staging_dir, "chunk_*.npz")))
+        if existing_chunks:
+            try:
+                last_chunk = existing_chunks[-1]
+                # format: chunk_000123.npz
+                last_idx_str = os.path.basename(last_chunk).split('_')[1].split('.')[0]
+                chunk_idx = int(last_idx_str) + 1
+                start_item_idx = chunk_idx * chunk_size
+                
+                if start_item_idx >= total_sents:
+                    print("  All chunks already exist. Skipping processing.")
+                    start_item_idx = total_sents 
+                else:
+                    print(f"  Resuming at chunk {chunk_idx} (item {start_item_idx}/{total_sents})")
+            except Exception as e:
+                print(f"  Error determining resume position: {e}. Overwriting.")
+                chunk_idx = 0
+                start_item_idx = 0
+
+    with tqdm_class(total=total_sents, initial=start_item_idx, desc=desc) as pbar:
+        for i in range(start_item_idx, total_sents, chunk_size):
+            print(f"  [DEBUG] Processing chunk {chunk_idx} (items {i} to {min(i+chunk_size, total_sents)})...")
             chunk = batch_items[i : i + chunk_size]
+            
+            t0 = time.time()
             chunk_results = embedder.batch_extract(chunk, batch_size=embed_batch_size)
+            dt = time.time() - t0
+            print(f"  [DEBUG] Batch extraction finished in {dt:.2f}s. Results: {len(chunk_results)} items.")
 
             if chunk_results:
                 # Prepare data for NPZ
@@ -310,11 +374,24 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
 
             pbar.update(len(chunk))
 
+    # Recalculate total_written by scanning all chunks to ensure manifest is correct
+    final_npz_files = globlib.glob(os.path.join(collection_staging_dir, "chunk_*.npz"))
+    final_total = 0
+    if resume and start_item_idx > 0:
+        for f in final_npz_files:
+            try:
+                with np.load(f) as data:
+                    final_total += len(data['ids'])
+            except:
+                pass
+    else:
+        final_total = total_written
+
     # Write manifest file with metadata about this collection
     manifest = {
         "collection_name": collection_name,
-        "num_chunks": chunk_idx,
-        "total_embeddings": total_written,
+        "num_chunks": len(final_npz_files),
+        "total_embeddings": final_total,
         "db_path": db_path,
         "embedding_dim": embedder.embedding_dim if hasattr(embedder, 'embedding_dim') else None
     }
@@ -322,8 +399,8 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
     with open(manifest_path, 'w') as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"  Wrote {total_written} embeddings to {chunk_idx} NPZ files in {collection_staging_dir}")
-    return total_written
+    print(f"  Wrote {final_total} embeddings (total) to {len(final_npz_files)} NPZ files in {collection_staging_dir}")
+    return final_total
 
 
 def bulk_import_from_staging(staging_dir: str, vector_store: VectorStore,
@@ -501,6 +578,7 @@ def run_batch_generation(
     staging_dir: str = None,
     import_only: bool = False,
     delete_staging_after_import: bool = False,
+    resume: bool = False,
 ):
     """
     Entry point for the batch analysis/generation workflow.
@@ -527,6 +605,7 @@ def run_batch_generation(
         staging_dir: Directory for NPZ staging files. Default: data/embedding_staging
         import_only: If True, skip embedding generation and only import existing staged files.
         delete_staging_after_import: If True, delete NPZ files after successful import.
+        resume: If True, attempt to resume from existing staged files and plan.
     """
 
     # Handle legacy args
@@ -613,7 +692,7 @@ def run_batch_generation(
         if staged:
             for coll in [coll_t1, coll_t2]:
                 coll_staging = os.path.join(staging_dir, coll)
-                if os.path.exists(coll_staging):
+                if os.path.exists(coll_staging) and not resume:
                     import shutil
                     shutil.rmtree(coll_staging)
                     print(f"  Cleared staging: {coll_staging}")
@@ -651,12 +730,14 @@ def run_batch_generation(
         print(f"\n--- Processing T1 Corpus -> NPZ (Collection: {coll_t1}) ---")
         process_corpus_staged(db_path_t1, coll_t1, words_t1, embedder, staging_dir,
                               max_samples=max_samples, pos_filter=pos_filter,
-                              embed_batch_size=embed_batch_size, tqdm_class=tqdm_class)
+                              embed_batch_size=embed_batch_size, tqdm_class=tqdm_class,
+                              resume=resume)
 
         print(f"\n--- Processing T2 Corpus -> NPZ (Collection: {coll_t2}) ---")
         process_corpus_staged(db_path_t2, coll_t2, words_t2, embedder, staging_dir,
                               max_samples=max_samples, pos_filter=pos_filter,
-                              embed_batch_size=embed_batch_size, tqdm_class=tqdm_class)
+                              embed_batch_size=embed_batch_size, tqdm_class=tqdm_class,
+                              resume=resume)
 
         # Now bulk import to ChromaDB
         print(f"\n=== Bulk importing staged embeddings to ChromaDB ===")
