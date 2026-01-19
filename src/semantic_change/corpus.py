@@ -127,27 +127,49 @@ class Corpus:
             print(f"Error fetching frequency map: {e}")
             return {}, {}
 
-    def query_samples(self, word: str, n: int = 50, pos_filter: str = None) -> List[Dict[str, str]]:
+    def query_samples(self, word: str, n: int = 50, pos_filter: str = None, exact_match: bool = False) -> List[Dict[str, str]]:
         """
-        Retrieves n random samples containing the word (searched by lemma).
-        Returns a list of dicts: {"sentence": str, "matched_word": str}
+        Retrieves n random samples containing the word.
+
+        Args:
+            word: The word to search for.
+            n: Maximum number of samples to return.
+            pos_filter: Optional POS tag filter (e.g., 'NOUN', 'VERB').
+            exact_match: If True, search by exact token form (case-insensitive).
+                        If False (default), search by lemma.
+
+        Returns:
+            List of dicts with keys: sentence, matched_word, start_char, sentence_id,
+            file_offset_start, file_path, lemma.
         """
         if not self.conn:
             print("Error: No ingested database found. Please ingest the corpus first.")
             return []
-            
-        word_lemma = word.lower()
+
+        word_lower = word.lower()
         cursor = self.conn.cursor()
-        
+
         # We need the sentence text, the specific token form, its start offset, and file info
-        query = """
-            SELECT s.text, t.text, t.start_char, s.id, s.file_offset_start, f.filepath
-            FROM tokens t
-            JOIN sentences s ON t.sentence_id = s.id
-            JOIN files f ON s.file_id = f.id
-            WHERE t.lemma = ?
-        """
-        params = [word_lemma]
+        # Use exact token match or lemma match based on exact_match flag
+        if exact_match:
+            # Search by exact token form (case-insensitive using LOWER)
+            query = """
+                SELECT s.text, t.text, t.start_char, s.id, s.file_offset_start, f.filepath, t.lemma
+                FROM tokens t
+                JOIN sentences s ON t.sentence_id = s.id
+                JOIN files f ON s.file_id = f.id
+                WHERE LOWER(t.text) = ?
+            """
+        else:
+            # Search by lemma (original behavior)
+            query = """
+                SELECT s.text, t.text, t.start_char, s.id, s.file_offset_start, f.filepath, t.lemma
+                FROM tokens t
+                JOIN sentences s ON t.sentence_id = s.id
+                JOIN files f ON s.file_id = f.id
+                WHERE t.lemma = ?
+            """
+        params = [word_lower]
         
         if pos_filter:
             query += " AND t.pos = ?"
@@ -172,7 +194,7 @@ class Corpus:
                     "sentence_id": row[3],
                     "file_offset_start": row[4],
                     "file_path": row[5],
-                    "lemma": word_lemma
+                    "lemma": row[6]  # Use lemma from DB
                 })
             return results
         except sqlite3.Error as e:

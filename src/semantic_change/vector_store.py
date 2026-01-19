@@ -27,11 +27,11 @@ class VectorStore:
             raise
         self._collection_cache: Dict[str, Any] = {}
 
-    def get_or_create_collection(self, name: str):
+    def get_or_create_collection(self, name: str, metadata: Dict = None):
         # ChromaDB requires collection names to be alphanumeric, 3-63 chars.
         # Cache collection objects to avoid repeated lookups
         if name not in self._collection_cache:
-            self._collection_cache[name] = self.client.get_or_create_collection(name=name)
+            self._collection_cache[name] = self.client.get_or_create_collection(name=name, metadata=metadata)
         return self._collection_cache[name]
         
     def add_embeddings(self, collection_name: str,
@@ -148,23 +148,33 @@ class VectorStore:
     def get_available_models(self, project_id: str) -> List[str]:
         """
         Scans collections to find which models have been processed for a project.
-        Returns a list of unique safe model names (e.g., 'bert_base_uncased').
+        Returns a list of unique model names. Preferentially returns the original
+        Hugging Face model ID from metadata if available, otherwise parses the
+        safe name from the collection name.
 
         Args:
             project_id: 4-digit project identifier
-
-        Collection naming: embeddings_{project_id}_t1_{model}, embeddings_{project_id}_t2_{model}
         """
-        collections = self.list_collections()
+        try:
+            collections = self.client.list_collections()
+        except Exception:
+            return []
+
         models = set()
         prefix = f"embeddings_{project_id}_"
 
         for c in collections:
-            if not c.startswith(prefix):
+            name = c.name
+            if not name.startswith(prefix):
+                continue
+
+            # check metadata first
+            if c.metadata and "model_name" in c.metadata:
+                models.add(c.metadata["model_name"])
                 continue
 
             # Remove prefix: embeddings_{project_id}_
-            rest = c[len(prefix):]
+            rest = name[len(prefix):]
             parts = rest.split("_", 1)
 
             if len(parts) == 2:
@@ -184,15 +194,17 @@ class VectorStore:
 
         Args:
             project_id: 4-digit project identifier
-            model_name: Safe model name (e.g., 'bert_base_uncased')
+            model_name: HuggingFace model name or safe name
 
         Returns:
             Tuple of (collection_t1, collection_t2) - either may be None if not found
         """
         collections = self.list_collections()
 
-        coll_t1 = f"embeddings_{project_id}_t1_{model_name}"
-        coll_t2 = f"embeddings_{project_id}_t2_{model_name}"
+        # Sanitize model name to get the actual collection names
+        safe_model = model_name.replace("/", "_").replace("-", "_")
+        coll_t1 = f"embeddings_{project_id}_t1_{safe_model}"
+        coll_t2 = f"embeddings_{project_id}_t2_{safe_model}"
 
         found_t1 = coll_t1 if coll_t1 in collections else None
         found_t2 = coll_t2 if coll_t2 in collections else None

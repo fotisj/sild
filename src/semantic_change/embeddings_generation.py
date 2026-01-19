@@ -210,7 +210,8 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
                 "pos": r['pos'],
                 "sentence_id": r['sentence_id'],
                 "start_char": r['start_char'],
-                "end_char": r['end_char']
+                "end_char": r['end_char'],
+                "token": r.get('token', r['lemma'])  # Store actual token text for exact match queries
             } for r in chunk_results],
             ids=[f"{collection_name}_{r['lemma']}_{r['pos']}_{r['sentence_id']}_{r['start_char']}" for r in chunk_results]
         )
@@ -272,6 +273,7 @@ def run_batch_generation(
     test_samples_per_word: int = 50,
     embed_batch_size: int = None,
     tqdm_class: Type[tqdm_std] = tqdm,
+    pooling_strategy: str = "mean",
 ):
     """
     Entry point for the batch analysis/generation workflow.
@@ -283,6 +285,12 @@ def run_batch_generation(
         test_samples_per_word: Embeddings per word per period in test mode (default 50).
         embed_batch_size: Batch size for embedding extraction. If None, auto-detects based on GPU VRAM.
         tqdm_class: Progress bar class to use (tqdm for CLI, stqdm for Streamlit).
+        pooling_strategy: How to pool subword tokens. Options:
+            - 'mean': Mean of all subword tokens (default)
+            - 'first': First subword token only
+            - 'lemma_aligned': Only pool subwords matching lemma's tokenization length
+            - 'weighted': Position-weighted pooling
+            - 'lemma_replacement': Replace target with lemma before embedding (TokLem)
     """
 
     # Handle legacy args
@@ -314,7 +322,11 @@ def run_batch_generation(
 
     print(f"Loading embedding model '{model_name}'... (this may take a while for large models)")
     sys.stdout.flush()
-    embedder = BertEmbedder(model_name=model_name, filter_model=spacy_model)
+    embedder = BertEmbedder(
+        model_name=model_name,
+        filter_model=spacy_model,
+        pooling_strategy=pooling_strategy
+    )
     print("Embedding model loaded successfully.")
     sys.stdout.flush()
 
@@ -325,6 +337,10 @@ def run_batch_generation(
         print("--- Resetting Collections ---")
         vector_store.delete_collection(coll_t1)
         vector_store.delete_collection(coll_t2)
+
+    # Ensure collections are created with metadata (stores original model name)
+    vector_store.get_or_create_collection(coll_t1, metadata={"model_name": model_name})
+    vector_store.get_or_create_collection(coll_t2, metadata={"model_name": model_name})
 
     if test_mode:
         # Get shared words for test mode (same words in both periods)
@@ -369,6 +385,9 @@ if __name__ == "__main__":
     parser.add_argument("--reset", action="store_true", help="Delete existing collections before processing")
     parser.add_argument("--pos", type=str, default="NOUN,VERB,ADJ,ADV", help="Comma-separated POS tags to include")
     parser.add_argument("--batch-size", type=int, default=None, help="Embedding batch size (auto-detects based on GPU VRAM if not specified)")
+    parser.add_argument("--pooling", type=str, default="mean",
+                       choices=["mean", "first", "lemma_aligned", "weighted", "lemma_replacement"],
+                       help="Subword pooling strategy: mean (default), first, lemma_aligned, weighted, lemma_replacement (TokLem)")
 
     args = parser.parse_args()
 
@@ -394,5 +413,6 @@ if __name__ == "__main__":
         additional_words=user_words,
         reset_collections=args.reset,
         pos_filter=user_pos,
-        embed_batch_size=args.batch_size
+        embed_batch_size=args.batch_size,
+        pooling_strategy=args.pooling
     )

@@ -46,6 +46,7 @@ class AnalysisConfig:
     viz_max_instances: int = 100
     context_window: int = 0
     output_dir: str = "output"
+    exact_match: bool = False  # If True, search by exact token form instead of lemma
 
 
 @dataclass
@@ -306,7 +307,8 @@ def fetch_embeddings_from_store(
     n_samples: int,
     pos_filter: Optional[str],
     context_window: int,
-    period_label: str
+    period_label: str,
+    exact_match: bool = False
 ) -> Optional[EmbeddingData]:
     """
     Fetch embeddings from vector store for a target word.
@@ -320,6 +322,8 @@ def fetch_embeddings_from_store(
         pos_filter: Optional POS filter
         context_window: Context window size (0 = sentence only)
         period_label: Label for this time period
+        exact_match: If True, search by exact token form (case-insensitive).
+                    If False (default), search by lemma.
 
     Returns:
         EmbeddingData if found, None otherwise
@@ -330,10 +334,21 @@ def fetch_embeddings_from_store(
     word_lower = target_word.lower()
     use_strict_query = pos_filter and pos_filter != 'NOUN'
 
-    if use_strict_query:
-        where_clause = {"$and": [{"lemma": word_lower}, {"pos": pos_filter}]}
+    # Build where clause based on exact_match and pos_filter
+    if exact_match:
+        # Search by exact token form (case-insensitive)
+        # Note: ChromaDB metadata queries are case-sensitive, so we query by lowercased token
+        # For embeddings without 'token' field (legacy), fall back to lemma
+        if use_strict_query:
+            where_clause = {"$and": [{"token": target_word}, {"pos": pos_filter}]}
+        else:
+            where_clause = {"token": target_word}
     else:
-        where_clause = {"lemma": word_lower}
+        # Search by lemma (original behavior)
+        if use_strict_query:
+            where_clause = {"$and": [{"lemma": word_lower}, {"pos": pos_filter}]}
+        else:
+            where_clause = {"lemma": word_lower}
 
     limit_request = n_samples * 2 if not use_strict_query else n_samples
 
@@ -940,6 +955,7 @@ def run_single_analysis(
     n_samples: int = 50,
     viz_max_instances: int = 100,
     context_window: int = 0,
+    exact_match: bool = False,
     # Legacy parameters (deprecated)
     use_umap: Optional[bool] = None,
     umap_n_components: Optional[int] = None,
@@ -986,7 +1002,8 @@ def run_single_analysis(
         clustering_n_components=clustering_n_components,
         viz_reduction=viz_reduction,
         viz_max_instances=viz_max_instances,
-        context_window=context_window
+        context_window=context_window,
+        exact_match=exact_match
     )
 
     # Validate
@@ -1031,7 +1048,8 @@ def run_single_analysis(
             vector_store, coll_t1, config.db_path_t1,
             config.target_word, config.n_samples,
             config.pos_filter, config.context_window,
-            config.period_t1_label
+            config.period_t1_label,
+            exact_match=config.exact_match
         )
 
     data_t2 = None
@@ -1040,7 +1058,8 @@ def run_single_analysis(
             vector_store, coll_t2, config.db_path_t2,
             config.target_word, config.n_samples,
             config.pos_filter, config.context_window,
-            config.period_t2_label
+            config.period_t2_label,
+            exact_match=config.exact_match
         )
 
     if (data_t1 is None or data_t1.is_empty()) and (data_t2 is None or data_t2.is_empty()):

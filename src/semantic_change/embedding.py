@@ -13,6 +13,15 @@ import logging
 # Suppress huggingface_hub xet warnings
 logging.getLogger("huggingface_hub.file_download").setLevel(logging.ERROR)
 
+# Available pooling strategies for subword token aggregation
+POOLING_STRATEGIES = {
+    "mean": "Mean of all subword tokens (default, may be influenced by morphology)",
+    "first": "First subword token only (often carries most semantic content)",
+    "lemma_aligned": "Only pool subwords matching the lemma's tokenization length",
+    "weighted": "Position-weighted pooling (earlier subwords get higher weight)",
+    "lemma_replacement": "Replace target word with lemma before embedding (TokLem, Laicher et al. 2021)",
+}
+
 
 def detect_optimal_dtype() -> Optional[torch.dtype]:
     """
@@ -90,7 +99,7 @@ class BertEmbedder(Embedder):
     """
     def __init__(self, model_name: str = 'bert-base-uncased', device: str = None,
                  layers: List[int] = None, layer_op: str = 'mean', lang: str = 'en',
-                 filter_model: str = None):
+                 filter_model: str = None, pooling_strategy: str = 'mean'):
         """
         Args:
             model_name: HuggingFace model name.
@@ -99,10 +108,21 @@ class BertEmbedder(Embedder):
             layer_op: How to combine layers: 'mean', 'sum', or 'concat'. Default is 'mean'.
             lang: Language code for the blank spaCy model.
             filter_model: spaCy model for neighbor filtering (lemma/pos). If None, uses a default based on lang.
+            pooling_strategy: How to pool subword tokens. Options:
+                - 'mean': Mean of all subword tokens (default)
+                - 'first': First subword token only
+                - 'lemma_aligned': Only pool subwords matching lemma's tokenization length
+                - 'weighted': Position-weighted pooling (earlier tokens weighted higher)
+                - 'lemma_replacement': Replace target with lemma in text before embedding (TokLem)
         """
+        if pooling_strategy not in POOLING_STRATEGIES:
+            raise ValueError(f"Unknown pooling_strategy '{pooling_strategy}'. "
+                           f"Valid options: {list(POOLING_STRATEGIES.keys())}")
+
         self.model_name = model_name
         self.lang = lang
         self.filter_model_name = filter_model
+        self.pooling_strategy = pooling_strategy
         self.device_name = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.device = torch.device(self.device_name)
 
@@ -111,6 +131,7 @@ class BertEmbedder(Embedder):
 
         import sys
         print(f"Loading model '{model_name}' on {self.device_name}...")
+        print(f"  Pooling strategy: {pooling_strategy}")
         if self.mixed_precision_dtype:
             dtype_name = 'bfloat16' if self.mixed_precision_dtype == torch.bfloat16 else 'float16'
             print(f"  Mixed precision enabled: {dtype_name}")
@@ -272,13 +293,111 @@ class BertEmbedder(Embedder):
             flat_arr = arr.reshape(num_spans * seq_len, dim)
             return torch.from_numpy(flat_arr).to(self.device)
 
+    def _pool_subwords(self, sub_vectors: torch.Tensor, lemma: str = None) -> torch.Tensor:
+        """
+        Pool subword token vectors according to the configured pooling strategy.
+
+        Args:
+            sub_vectors: Tensor of shape (num_subtokens, dim) with subword embeddings
+            lemma: The lemma of the target word (needed for lemma_aligned strategy)
+
+        Returns:
+            Single pooled vector of shape (dim,)
+        """
+        if len(sub_vectors) == 1:
+            return sub_vectors[0]
+
+        if self.pooling_strategy == "mean":
+            return torch.mean(sub_vectors, dim=0)
+
+        elif self.pooling_strategy == "first":
+            return sub_vectors[0]
+
+        elif self.pooling_strategy == "weighted":
+            # Position-weighted: earlier subwords get higher weight
+            n = len(sub_vectors)
+            weights = 1.0 / torch.arange(1, n + 1, device=sub_vectors.device, dtype=sub_vectors.dtype)
+            weights = weights / weights.sum()
+            return (sub_vectors * weights.unsqueeze(1)).sum(dim=0)
+
+        elif self.pooling_strategy == "lemma_aligned":
+            # Only pool subwords up to the lemma's tokenization length
+            if lemma:
+                lemma_tokens = self.tokenizer.tokenize(lemma)
+                n_lemma = len(lemma_tokens)
+                if n_lemma > 0 and n_lemma < len(sub_vectors):
+                    return torch.mean(sub_vectors[:n_lemma], dim=0)
+            # Fallback to mean if lemma not provided or longer than actual tokens
+            return torch.mean(sub_vectors, dim=0)
+
+        else:
+            # lemma_replacement is handled at preprocessing stage, fallback to mean
+            return torch.mean(sub_vectors, dim=0)
+
+    def _preprocess_for_lemma_replacement(
+        self, items: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Preprocess items for lemma_replacement strategy (TokLem).
+        Replaces each target word in the text with its lemma.
+
+        For each item with multiple targets, creates separate items
+        (one per target) with the word replaced by its lemma.
+
+        Args:
+            items: List of dicts with 'text', 'id', 'targets' [(lemma, pos, start, end), ...]
+
+        Returns:
+            Modified items with lemma-replaced texts and adjusted offsets
+        """
+        modified_items = []
+
+        for item in items:
+            text = item['text']
+            sent_id = item['id']
+
+            for lemma, pos, start_char, end_char in item['targets']:
+                original_word = text[start_char:end_char]
+
+                # Preserve capitalization pattern from original word
+                if original_word and original_word[0].isupper():
+                    replacement = lemma[0].upper() + lemma[1:] if len(lemma) > 1 else lemma.upper()
+                else:
+                    replacement = lemma.lower()
+
+                # Create modified text with lemma replacing the target word
+                modified_text = text[:start_char] + replacement + text[end_char:]
+
+                # New end position after replacement
+                new_end_char = start_char + len(replacement)
+
+                modified_items.append({
+                    'id': sent_id,
+                    'text': modified_text,
+                    'targets': [(lemma, pos, start_char, new_end_char)],
+                    'original_token': original_word,  # Keep for metadata
+                })
+
+        return modified_items
+
     def batch_extract(self, items: List[Dict[str, Any]], batch_size: int = 32) -> List[Dict[str, Any]]:
         """
         Extracts embeddings for specific words using spacy-transformers alignment.
         Optimized to batch GPU→CPU transfers.
         Uses mixed precision (bf16/fp16) when available for ~2x speedup.
+
+        The pooling strategy (configured in __init__) determines how subword tokens are aggregated:
+        - 'mean': Mean of all subword tokens
+        - 'first': First subword token only
+        - 'lemma_aligned': Only pool subwords matching lemma's tokenization length
+        - 'weighted': Position-weighted pooling
+        - 'lemma_replacement': Replace target with lemma in text before embedding (TokLem)
         """
         results = []
+
+        # For lemma_replacement strategy, preprocess items to replace targets with lemmas
+        if self.pooling_strategy == "lemma_replacement":
+            items = self._preprocess_for_lemma_replacement(items)
 
         # We process in batches to leverage GPU
         for i in range(0, len(items), batch_size):
@@ -286,6 +405,8 @@ class BertEmbedder(Embedder):
             batch_texts = [x['text'] for x in batch_items]
             batch_targets = [x['targets'] for x in batch_items]
             batch_ids = [x['id'] for x in batch_items]
+            # For lemma_replacement, track original tokens
+            batch_original_tokens = [x.get('original_token') for x in batch_items]
 
             # 1. Run spaCy pipeline (includes transformer)
             # pipe() handles batching internally
@@ -303,6 +424,7 @@ class BertEmbedder(Embedder):
             for doc_idx, doc in enumerate(docs):
                 sent_id = batch_ids[doc_idx]
                 sent_targets = batch_targets[doc_idx]
+                original_token = batch_original_tokens[doc_idx]
 
                 trf_data = doc._.trf_data
                 # Combined vectors for all transformer tokens in this doc
@@ -324,20 +446,29 @@ class BertEmbedder(Embedder):
                         trf_indices.extend(align[token.i].data.flatten())
 
                     if trf_indices:
-                        # Deduplicate indices using set - faster than sorted(list(set()))
-                        trf_indices = list(set(trf_indices))
+                        # Deduplicate and sort indices to maintain order for position-based strategies
+                        trf_indices = sorted(set(trf_indices))
 
-                        # Extract vectors and pool on GPU
+                        # Extract vectors and pool on GPU using configured strategy
                         sub_vectors = combined_vectors[trf_indices]  # (num_subtokens, dim)
-                        word_vec = torch.mean(sub_vectors, dim=0)  # Stay on GPU
+                        word_vec = self._pool_subwords(sub_vectors, lemma=lemma)
 
                         batch_word_vecs.append(word_vec)
+
+                        # Determine the actual token text for metadata
+                        if self.pooling_strategy == "lemma_replacement" and original_token:
+                            # For TokLem, use the original token (before replacement)
+                            token_text = original_token
+                        else:
+                            token_text = span.text
+
                         batch_metadata.append({
                             "lemma": lemma,
                             "pos": pos,
                             "sentence_id": sent_id,
                             "start_char": w_start,
-                            "end_char": w_end
+                            "end_char": w_end,
+                            "token": token_text
                         })
 
             # Batch transfer: stack all vectors and move to CPU once

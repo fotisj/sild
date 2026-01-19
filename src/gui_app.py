@@ -90,6 +90,8 @@ def get_default_config() -> dict:
         "layer_op": "mean",
         "lang": "en",
         "context_window": 0,
+        "exact_match": False,
+        "pooling_strategy": "mean",
     }
 
 
@@ -172,13 +174,24 @@ def ensure_project_id(config: dict) -> str:
     return project_id
 
 
+@st.cache_resource
+def get_vector_store():
+    """Gets a cached VectorStore instance to avoid multiple ChromaDB connections."""
+    from semantic_change.vector_store import VectorStore
+    return VectorStore(persistence_path="data/chroma_db")
+
+
+def clear_vector_store_cache():
+    """Clears the cached VectorStore instance (call after delete operations)."""
+    get_vector_store.clear()
+
+
 def get_available_models(project_id: str) -> list[str]:
     """Gets list of models with pre-computed embeddings from ChromaDB for a project."""
     if not project_id:
         return []
     try:
-        from semantic_change.vector_store import VectorStore
-        store = VectorStore(persistence_path="data/chroma_db")
+        store = get_vector_store()
         return store.get_available_models(project_id)
     except Exception:
         return []
@@ -574,11 +587,12 @@ def run_batch_embedding_process(
     model_name: str, min_freq: int,
     custom_words: list[str],
     test_mode: bool = False,
-    max_samples: int = 200
+    max_samples: int = 200,
+    pooling_strategy: str = "mean"
 ) -> None:
     """Executes the batch embedding generation process."""
     status_container = st.empty()
-    status_container.info(f"Starting embedding generation for {model_name}...")
+    status_container.info(f"Starting embedding generation for {model_name} (pooling: {pooling_strategy})...")
 
     log_container = st.empty()
     logs = []
@@ -603,6 +617,7 @@ def run_batch_embedding_process(
                 reset_collections=True,
                 test_mode=test_mode,
                 tqdm_class=stqdm,
+                pooling_strategy=pooling_strategy,
             )
         status_container.success("Batch Processing Complete!")
     except Exception as e:
@@ -654,6 +669,25 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
     st.markdown("#### Advanced Model Config")
     render_layer_config(config)
 
+    # Pooling strategy selection
+    st.markdown("#### Subword Pooling Strategy")
+    pooling_options = {
+        "mean": "Mean (default) - Average all subword tokens",
+        "first": "First - Use only the first subword token",
+        "lemma_aligned": "Lemma-aligned - Pool only subwords matching lemma tokenization",
+        "weighted": "Weighted - Position-weighted (earlier tokens get higher weight)",
+        "lemma_replacement": "TokLem - Replace target with lemma before embedding (Laicher et al. 2021)",
+    }
+    pooling_strategy = st.selectbox(
+        "Pooling Strategy",
+        options=list(pooling_options.keys()),
+        format_func=lambda x: pooling_options[x],
+        index=list(pooling_options.keys()).index(config.get("pooling_strategy", "mean")),
+        help="How to aggregate subword token embeddings into a single word embedding. "
+             "'TokLem' is recommended for reducing morphological bias in semantic clustering."
+    )
+    config["pooling_strategy"] = pooling_strategy
+
     if st.button("Start Batch Process", type="primary"):
         save_config(config)
         custom_words = []
@@ -663,13 +697,70 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
 
         run_batch_embedding_process(
             config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
-            test_mode=test_mode, max_samples=max_samples
+            test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy
         )
 
 
 def render_manage_embeddings_tab(project_id: str) -> None:
     """Renders the 'Manage Existing' embeddings tab content."""
     st.subheader("Existing Embedding Sets")
+
+    # Check if we're in the middle of a delete operation
+    if st.session_state.get("deleting_model"):
+        model_to_delete = st.session_state["deleting_model"]
+        with st.status(f"Deleting {model_to_delete}...", expanded=True) as status:
+            try:
+                # Clear cache first to release any locks
+                st.write("Clearing vector store cache...")
+                clear_vector_store_cache()
+
+                st.write("Connecting to ChromaDB...")
+                store = get_vector_store()
+                # Sanitize model name for collection (matches how collections are created)
+                safe_model = model_to_delete.replace("/", "_").replace("-", "_")
+                coll_t1 = f"embeddings_{project_id}_t1_{safe_model}"
+                coll_t2 = f"embeddings_{project_id}_t2_{safe_model}"
+
+                # Check sizes first
+                try:
+                    count1 = store.count(coll_t1)
+                    st.write(f"Collection {coll_t1}: {count1} embeddings")
+                except:
+                    st.write(f"Collection {coll_t1}: not found or empty")
+                    count1 = 0
+
+                try:
+                    count2 = store.count(coll_t2)
+                    st.write(f"Collection {coll_t2}: {count2} embeddings")
+                except:
+                    st.write(f"Collection {coll_t2}: not found or empty")
+                    count2 = 0
+
+                st.write(f"Deleting {coll_t1}... (this may take a while for large collections)")
+                success1, msg1 = store.delete_collection(coll_t1)
+                st.write(f"Result: {msg1}")
+
+                st.write(f"Deleting {coll_t2}... (this may take a while for large collections)")
+                success2, msg2 = store.delete_collection(coll_t2)
+                st.write(f"Result: {msg2}")
+
+                # Clear cache again after deletion to ensure fresh state
+                clear_vector_store_cache()
+
+                if success1 or success2:
+                    status.update(label=f"Deleted {model_to_delete}", state="complete")
+                else:
+                    status.update(label=f"No embeddings found for {model_to_delete}", state="complete")
+            except Exception as e:
+                status.update(label=f"Delete failed: {e}", state="error")
+                import traceback
+                st.code(traceback.format_exc())
+            finally:
+                st.session_state["deleting_model"] = None
+                time.sleep(1)
+                st.rerun()
+        return
+
     available_models = get_available_models(project_id)
 
     if not available_models:
@@ -681,27 +772,8 @@ def render_manage_embeddings_tab(project_id: str) -> None:
         col1, col2 = st.columns([3, 1])
         col1.markdown(f"**{m}**")
         if col2.button("Delete", key=f"del_{m}"):
-            delete_model_embeddings(project_id, m)
-
-
-def delete_model_embeddings(project_id: str, model_safe_name: str) -> None:
-    """Deletes embeddings for a specific model."""
-    try:
-        from semantic_change.vector_store import VectorStore
-        store = VectorStore(persistence_path="data/chroma_db")
-        coll_t1 = f"embeddings_{project_id}_t1_{model_safe_name}"
-        coll_t2 = f"embeddings_{project_id}_t2_{model_safe_name}"
-        success1, msg1 = store.delete_collection(coll_t1)
-        success2, msg2 = store.delete_collection(coll_t2)
-
-        if success1 or success2:
-            st.success(f"Deleted embeddings for {model_safe_name}\n\n{msg1}\n\n{msg2}")
-        else:
-            st.warning(f"No embeddings found for {model_safe_name}")
-        time.sleep(1)
-        st.rerun()
-    except Exception as e:
-        st.error(f"Delete failed: {e}")
+            st.session_state["deleting_model"] = m
+            st.rerun()
 
 
 def render_embeddings_page(config: dict, db_t1: str, db_t2: str) -> None:
@@ -760,8 +832,10 @@ def render_db_stats_summary(config: dict, db_t1: str, db_t2: str, period_t1_labe
         if available_models:
             # Get stats for first available model
             model = available_models[0]
-            coll_t1 = f"embeddings_{project_id}_t1_{model}"
-            coll_t2 = f"embeddings_{project_id}_t2_{model}"
+            # Sanitize model name for collection (matches how collections are created)
+            safe_model = model.replace("/", "_").replace("-", "_")
+            coll_t1 = f"embeddings_{project_id}_t1_{safe_model}"
+            coll_t2 = f"embeddings_{project_id}_t2_{safe_model}"
             count_t1 = store.count(coll_t1)
             count_t2 = store.count(coll_t2)
             total_embeddings = count_t1 + count_t2
@@ -963,7 +1037,14 @@ def render_dashboard_parameters(config: dict, available_models: list[str]) -> di
         help="The HuggingFace model ID used for tokenization. Usually matches the embedding set.",
     )
 
+    # Target word input
     params["target_word"] = st.text_input("Target Word", value=config["target_word"])
+    params["exact_match"] = st.checkbox(
+        "Exact wordform",
+        value=config.get("exact_match", False),
+        help="If checked, search by exact token form (e.g., 'Glück' only matches 'Glück'). "
+             "If unchecked, search by lemma (e.g., 'Glück' also matches 'Glücke', 'Glückes')."
+    )
 
     # POS filter
     pos_options = ["None", "NOUN", "VERB", "ADJ"]
@@ -1118,6 +1199,7 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                     viz_reduction=params["viz_reduction"],
                     n_samples=params["n_samples"],
                     viz_max_instances=config["viz_max_instances"],
+                    exact_match=params.get("exact_match", False),
                 )
 
             st.success("Analysis Complete!")
