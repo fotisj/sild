@@ -5,7 +5,7 @@ os.environ["HF_HUB_DISABLE_XET_WARNING"] = "1"
 import torch
 import numpy as np
 import spacy
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModel
 from typing import List, Tuple, Dict, Any, Optional
 import warnings
 import logging
@@ -92,7 +92,7 @@ class BertEmbedder(Embedder):
     """
     Generates contextual embeddings using a Transformer model and provides MLM-based decoding.
     Allows configuration of which layers to use and how to combine them.
-    Utilizes spacy-transformers for robust linguistic-to-transformer alignment.
+    Uses direct HuggingFace transformers with offset_mapping for character-to-subword alignment.
 
     The MLM model and filter model are loaded lazily on first call to get_nearest_neighbors()
     to reduce memory usage and startup time for batch embedding extraction.
@@ -105,8 +105,11 @@ class BertEmbedder(Embedder):
             model_name: HuggingFace model name.
             device: 'cpu' or 'cuda'.
             layers: List of layer indices to use (e.g., [-1, -2, -3, -4]). Default is [-1].
+                    Supports negative indexing: -1 is last layer, -2 is second-to-last, etc.
+                    Layer 0 is the input embeddings, layers 1-12 are transformer layers (for BERT-base).
             layer_op: How to combine layers: 'mean', 'sum', or 'concat'. Default is 'mean'.
-            lang: Language code for the blank spaCy model.
+                      'concat' will multiply output dimension by len(layers).
+            lang: Language code for the spaCy filter model.
             filter_model: spaCy model for neighbor filtering (lemma/pos). If None, uses a default based on lang.
             pooling_strategy: How to pool subword tokens. Options:
                 - 'mean': Mean of all subword tokens (default)
@@ -137,48 +140,25 @@ class BertEmbedder(Embedder):
             print(f"  Mixed precision enabled: {dtype_name}")
         sys.stdout.flush()
 
-        # 1. Initialize spaCy pipeline with transformer
+        # Load transformer model directly with HuggingFace (enables multi-layer access)
         try:
-            # Set device for spacy-transformers before loading
-            if self.device.type == "cuda":
-                print(f"  Requesting GPU {self.device.index if self.device.index is not None else 0}...")
-                sys.stdout.flush()
-                spacy.require_gpu(self.device.index if self.device.index is not None else 0)
+            print(f"  Loading transformer model with output_hidden_states=True...")
+            sys.stdout.flush()
+            self.model = AutoModel.from_pretrained(model_name, output_hidden_states=True).to(self.device)
+            self.model.eval()
+            print(f"  Model loaded on {self.device_name}.")
+            sys.stdout.flush()
 
-            print(f"  Creating spaCy pipeline...")
+            print(f"  Loading tokenizer...")
             sys.stdout.flush()
-            self.nlp = spacy.blank(lang)
-            # Use spacy-transformers to add the transformer component
-            config = {
-                "model": {
-                    "@architectures": "spacy-transformers.TransformerModel.v3",
-                    "name": model_name,
-                    "tokenizer_config": {"use_fast": True},
-                    "transformer_config": {"output_hidden_states": True}
-                }
-            }
-            print(f"  Adding transformer component (downloading/loading model weights)...")
-            sys.stdout.flush()
-            self.nlp.add_pipe("transformer", config=config)
-
-            # Initialize the pipeline (crucial for loading the actual model/tokenizer)
-            print(f"  Initializing pipeline...")
-            sys.stdout.flush()
-            self.nlp.initialize()
-            print(f"  spaCy pipeline ready.")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            print(f"  Tokenizer loaded.")
             sys.stdout.flush()
 
         except Exception as e:
-            print(f"Error initializing spacy-transformers: {e}")
+            print(f"Error loading model '{model_name}': {e}")
             sys.stdout.flush()
             raise
-
-        # 2. Tokenizer is needed for decoding, load it now
-        print(f"  Loading tokenizer...")
-        sys.stdout.flush()
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        print(f"  Tokenizer loaded.")
-        sys.stdout.flush()
 
         # Lazy-loaded components (initialized on first use in get_nearest_neighbors)
         self._mlm_model = None  # Will be loaded on first neighbor query
@@ -188,7 +168,12 @@ class BertEmbedder(Embedder):
         self.layers = layers if layers is not None else [-1]
         self.layer_op = layer_op.lower()
 
+        # Validate layer_op
+        if self.layer_op not in ('mean', 'median', 'sum', 'concat'):
+            raise ValueError(f"Unknown layer_op '{layer_op}'. Valid options: 'mean', 'median', 'sum', 'concat'")
+
         print(f"BertEmbedder initialization complete for '{model_name}'.")
+        print(f"  Layers: {self.layers}, Layer operation: {self.layer_op}")
         print(f"  (MLM head and filter model will be loaded on first neighbor query)")
         sys.stdout.flush()
 
@@ -264,34 +249,87 @@ class BertEmbedder(Embedder):
         """Property for backward compatibility - lazily loads filter model."""
         return self._ensure_filter_nlp()
 
-    def _combine_layers(self, trf_data) -> torch.Tensor:
+    def _get_subword_indices_for_span(
+        self, offset_mapping: List[Tuple[int, int]], start_char: int, end_char: int
+    ) -> List[int]:
         """
-        Extracts and combines hidden states from trf_data.
-        Optimized to stay on GPU when using cupy arrays (avoids GPU→CPU→GPU round-trip).
+        Find subword token indices that overlap with a character span.
+
+        Args:
+            offset_mapping: List of (start_char, end_char) tuples from tokenizer
+            start_char: Start character position of target word
+            end_char: End character position of target word
+
+        Returns:
+            List of token indices that overlap with the character span
         """
-        # trf_data.tensors[0] is (num_spans, seq_len, dim)
-        arr = trf_data.tensors[0]
-        num_spans, seq_len, dim = arr.shape
+        indices = []
+        for idx, (tok_start, tok_end) in enumerate(offset_mapping):
+            # Skip special tokens (offset_mapping shows (0, 0) for special tokens)
+            if tok_start == 0 and tok_end == 0:
+                continue
+            # Check if token overlaps with target span
+            if tok_start < end_char and tok_end > start_char:
+                indices.append(idx)
+        return indices
 
-        # Multi-layer warning (we only support last layer currently)
-        if self.layers != [-1] and len(self.layers) > 0:
-            warnings.warn("Multi-layer combination via spacy-transformers is currently limited to the last layer. Using last layer.")
+    def _combine_layers(
+        self, hidden_states: Tuple[torch.Tensor, ...], token_indices: List[int]
+    ) -> torch.Tensor:
+        """
+        Extract and combine hidden states from specified layers for given token indices.
 
-        # Handle cupy arrays (GPU) - use DLPack for zero-copy transfer to torch
-        if hasattr(arr, "__dlpack__"):
-            # Reshape on cupy array first (stays on GPU)
-            flat_arr = arr.reshape(num_spans * seq_len, dim)
-            # Zero-copy transfer via DLPack (requires torch >= 1.10)
-            return torch.from_dlpack(flat_arr)
-        elif hasattr(arr, "get"):
-            # Fallback for older cupy without DLPack support
-            arr = arr.get()
-            flat_arr = arr.reshape(num_spans * seq_len, dim)
-            return torch.from_numpy(flat_arr).to(self.device)
+        Args:
+            hidden_states: Tuple of tensors from model output, each (batch, seq_len, hidden_dim).
+                          hidden_states[0] is input embeddings, [1] to [12] are transformer layers (BERT-base).
+            token_indices: List of token indices to extract embeddings for
+
+        Returns:
+            Tensor of shape (num_tokens, output_dim) where output_dim depends on layer_op:
+            - 'mean' or 'sum': output_dim = hidden_dim
+            - 'concat': output_dim = hidden_dim * len(layers)
+        """
+        num_total_layers = len(hidden_states)
+
+        # Convert negative indices to positive (e.g., -1 -> 12 for 13-layer BERT)
+        layer_indices = [l if l >= 0 else num_total_layers + l for l in self.layers]
+
+        # Validate layer indices
+        for idx in layer_indices:
+            if idx < 0 or idx >= num_total_layers:
+                raise ValueError(
+                    f"Layer index {idx} out of range. Model has {num_total_layers} layers (0 to {num_total_layers-1})."
+                )
+
+        # Extract embeddings for specified tokens from each selected layer
+        # Each hidden_states[layer] is (batch=1, seq_len, hidden_dim)
+        # We want (num_tokens, num_layers, hidden_dim)
+        layer_embeddings = []
+        for layer_idx in layer_indices:
+            # Extract tokens: (num_tokens, hidden_dim)
+            token_embeds = hidden_states[layer_idx][0, token_indices, :]
+            layer_embeddings.append(token_embeds)
+
+        # Stack layers: (num_layers, num_tokens, hidden_dim)
+        stacked = torch.stack(layer_embeddings, dim=0)
+        # Transpose to (num_tokens, num_layers, hidden_dim)
+        stacked = stacked.permute(1, 0, 2)
+
+        # Combine according to layer_op
+        if self.layer_op == 'mean':
+            # (num_tokens, hidden_dim)
+            return stacked.mean(dim=1)
+        elif self.layer_op == 'median':
+            # (num_tokens, hidden_dim)
+            return stacked.median(dim=1).values
+        elif self.layer_op == 'sum':
+            # (num_tokens, hidden_dim)
+            return stacked.sum(dim=1)
+        elif self.layer_op == 'concat':
+            # (num_tokens, num_layers * hidden_dim)
+            return stacked.flatten(start_dim=1)
         else:
-            # numpy array (CPU)
-            flat_arr = arr.reshape(num_spans * seq_len, dim)
-            return torch.from_numpy(flat_arr).to(self.device)
+            raise ValueError(f"Unknown layer_op: {self.layer_op}")
 
     def _pool_subwords(self, sub_vectors: torch.Tensor, lemma: str = None) -> torch.Tensor:
         """
@@ -359,11 +397,9 @@ class BertEmbedder(Embedder):
             for lemma, pos, start_char, end_char in item['targets']:
                 original_word = text[start_char:end_char]
 
-                # Preserve capitalization pattern from original word
-                if original_word and original_word[0].isupper():
-                    replacement = lemma[0].upper() + lemma[1:] if len(lemma) > 1 else lemma.upper()
-                else:
-                    replacement = lemma.lower()
+                # Use lemma as-is to preserve case (important for cased models)
+                # SpaCy lemmas already have correct case (e.g., German nouns capitalized)
+                replacement = lemma
 
                 # Create modified text with lemma replacing the target word
                 modified_text = text[:start_char] + replacement + text[end_char:]
@@ -382,8 +418,9 @@ class BertEmbedder(Embedder):
 
     def batch_extract(self, items: List[Dict[str, Any]], batch_size: int = 32) -> List[Dict[str, Any]]:
         """
-        Extracts embeddings for specific words using spacy-transformers alignment.
-        Optimized to batch GPU→CPU transfers.
+        Extracts embeddings for specific words using direct HuggingFace transformers.
+        Uses offset_mapping for character-to-subword alignment.
+        Supports true multi-layer extraction via output_hidden_states.
         Uses mixed precision (bf16/fp16) when available for ~2x speedup.
 
         The pooling strategy (configured in __init__) determines how subword tokens are aggregated:
@@ -408,68 +445,81 @@ class BertEmbedder(Embedder):
             # For lemma_replacement, track original tokens
             batch_original_tokens = [x.get('original_token') for x in batch_items]
 
-            # 1. Run spaCy pipeline (includes transformer)
-            # pipe() handles batching internally
-            # Use mixed precision if available (bf16 for datacenter GPUs, fp16 for consumer)
-            if self.mixed_precision_dtype and self.device.type == 'cuda':
-                with torch.autocast('cuda', dtype=self.mixed_precision_dtype):
-                    docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
-            else:
-                docs = list(self.nlp.pipe(batch_texts, batch_size=len(batch_texts)))
+            # Tokenize with offset mapping for character-to-subword alignment
+            encodings = self.tokenizer(
+                batch_texts,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_offsets_mapping=True
+            )
+
+            # Move input tensors to device
+            input_ids = encodings['input_ids'].to(self.device)
+            attention_mask = encodings['attention_mask'].to(self.device)
+            # offset_mapping stays on CPU (it's used for alignment lookup)
+            offset_mappings = encodings['offset_mapping']
+
+            # Forward pass through the model
+            with torch.no_grad():
+                if self.mixed_precision_dtype and self.device.type == 'cuda':
+                    with torch.autocast('cuda', dtype=self.mixed_precision_dtype):
+                        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                else:
+                    outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+
+            # hidden_states is a tuple of (num_layers + 1) tensors, each (batch, seq_len, hidden_dim)
+            # hidden_states[0] is input embeddings, [1] to [12] are transformer layers (BERT-base)
+            hidden_states = outputs.hidden_states
 
             # Collect word vectors on GPU, transfer in batch at end
             batch_word_vecs = []  # List of tensors on GPU
             batch_metadata = []   # Corresponding metadata
 
-            for doc_idx, doc in enumerate(docs):
+            for doc_idx in range(len(batch_texts)):
                 sent_id = batch_ids[doc_idx]
                 sent_targets = batch_targets[doc_idx]
                 original_token = batch_original_tokens[doc_idx]
+                text = batch_texts[doc_idx]
+                offset_mapping = offset_mappings[doc_idx].tolist()
 
-                trf_data = doc._.trf_data
-                # Combined vectors for all transformer tokens in this doc
-                combined_vectors = self._combine_layers(trf_data)  # (seq_len, dim)
-
-                # Alignment map: doc._.trf_data.align
-                # align[i] gives indices of transformer tokens for the i-th spacy token
-                align = trf_data.align
+                # Extract hidden states for this document only
+                # We need to index into hidden_states for this specific document
+                doc_hidden_states = tuple(hs[doc_idx:doc_idx+1, :, :] for hs in hidden_states)
 
                 for lemma, pos, w_start, w_end in sent_targets:
-                    # Find the spacy token(s) that match the char span [w_start, w_end)
-                    span = doc.char_span(w_start, w_end, alignment_mode="expand")
-                    if span is None:
+                    # Find subword token indices that overlap with the character span
+                    token_indices = self._get_subword_indices_for_span(offset_mapping, w_start, w_end)
+
+                    if not token_indices:
+                        # No tokens found for this span - skip
                         continue
 
-                    # Collect all transformer token indices for all spacy tokens in the span
-                    trf_indices = []
-                    for token in span:
-                        trf_indices.extend(align[token.i].data.flatten())
+                    # Extract and combine layers for these token indices
+                    # Returns (num_tokens, output_dim)
+                    combined = self._combine_layers(doc_hidden_states, token_indices)
 
-                    if trf_indices:
-                        # Deduplicate and sort indices to maintain order for position-based strategies
-                        trf_indices = sorted(set(trf_indices))
+                    # Pool subword tokens according to strategy
+                    word_vec = self._pool_subwords(combined, lemma=lemma)
 
-                        # Extract vectors and pool on GPU using configured strategy
-                        sub_vectors = combined_vectors[trf_indices]  # (num_subtokens, dim)
-                        word_vec = self._pool_subwords(sub_vectors, lemma=lemma)
+                    batch_word_vecs.append(word_vec)
 
-                        batch_word_vecs.append(word_vec)
+                    # Determine the actual token text for metadata
+                    if self.pooling_strategy == "lemma_replacement" and original_token:
+                        # For TokLem, use the original token (before replacement)
+                        token_text = original_token
+                    else:
+                        token_text = text[w_start:w_end]
 
-                        # Determine the actual token text for metadata
-                        if self.pooling_strategy == "lemma_replacement" and original_token:
-                            # For TokLem, use the original token (before replacement)
-                            token_text = original_token
-                        else:
-                            token_text = span.text
-
-                        batch_metadata.append({
-                            "lemma": lemma,
-                            "pos": pos,
-                            "sentence_id": sent_id,
-                            "start_char": w_start,
-                            "end_char": w_end,
-                            "token": token_text
-                        })
+                    batch_metadata.append({
+                        "lemma": lemma,
+                        "pos": pos,
+                        "sentence_id": sent_id,
+                        "start_char": w_start,
+                        "end_char": w_end,
+                        "token": token_text
+                    })
 
             # Batch transfer: stack all vectors and move to CPU once
             if batch_word_vecs:

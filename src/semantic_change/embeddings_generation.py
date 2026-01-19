@@ -274,6 +274,8 @@ def run_batch_generation(
     embed_batch_size: int = None,
     tqdm_class: Type[tqdm_std] = tqdm,
     pooling_strategy: str = "mean",
+    layers: List[int] = None,
+    layer_op: str = "mean",
 ):
     """
     Entry point for the batch analysis/generation workflow.
@@ -291,6 +293,10 @@ def run_batch_generation(
             - 'lemma_aligned': Only pool subwords matching lemma's tokenization length
             - 'weighted': Position-weighted pooling
             - 'lemma_replacement': Replace target with lemma before embedding (TokLem)
+        layers: List of transformer layer indices to use (e.g., [-1] for last layer,
+            [-4,-3,-2,-1] for last 4 layers). Default is [-1].
+        layer_op: How to combine multiple layers: 'mean', 'median', 'sum', or 'concat'.
+            Default is 'mean'. Note: 'concat' multiplies output dimension by len(layers).
     """
 
     # Handle legacy args
@@ -325,7 +331,9 @@ def run_batch_generation(
     embedder = BertEmbedder(
         model_name=model_name,
         filter_model=spacy_model,
-        pooling_strategy=pooling_strategy
+        pooling_strategy=pooling_strategy,
+        layers=layers,
+        layer_op=layer_op
     )
     print("Embedding model loaded successfully.")
     sys.stdout.flush()
@@ -388,6 +396,11 @@ if __name__ == "__main__":
     parser.add_argument("--pooling", type=str, default="mean",
                        choices=["mean", "first", "lemma_aligned", "weighted", "lemma_replacement"],
                        help="Subword pooling strategy: mean (default), first, lemma_aligned, weighted, lemma_replacement (TokLem)")
+    parser.add_argument("--layers", type=str, default="-1",
+                       help="Comma-separated layer indices (e.g., '-1' for last layer, '-4,-3,-2,-1' for last 4 layers)")
+    parser.add_argument("--layer-op", type=str, default="mean",
+                       choices=["mean", "median", "sum", "concat"],
+                       help="How to combine multiple layers: mean (default), median, sum, or concat")
 
     args = parser.parse_args()
 
@@ -402,6 +415,7 @@ if __name__ == "__main__":
 
     user_words = [w.strip() for w in args.words.split(',')] if args.words else []
     user_pos = [p.strip().upper() for p in args.pos.split(',')] if args.pos else ('NOUN', 'VERB', 'ADJ', 'ADV')
+    user_layers = [int(l.strip()) for l in args.layers.split(',')] if args.layers else [-1]
 
     run_batch_generation(
         project_id=project_id,
@@ -414,5 +428,7 @@ if __name__ == "__main__":
         reset_collections=args.reset,
         pos_filter=user_pos,
         embed_batch_size=args.batch_size,
-        pooling_strategy=args.pooling
+        pooling_strategy=args.pooling,
+        layers=user_layers,
+        layer_op=args.layer_op
     )

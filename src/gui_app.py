@@ -572,7 +572,7 @@ def render_layer_config(config: dict) -> None:
         selected_labels = st.multiselect("Layers to Use", list(layer_options.keys()), default=default_labels)
         config["layers"] = [layer_options[l] for l in selected_labels]
 
-        combo_options = ["Mean", "Sum", "Concat"]
+        combo_options = ["Mean", "Median", "Sum", "Concat"]
         current_op = config.get("layer_op", "mean").title()
         if current_op not in combo_options:
             current_op = "Mean"
@@ -588,11 +588,16 @@ def run_batch_embedding_process(
     custom_words: list[str],
     test_mode: bool = False,
     max_samples: int = 200,
-    pooling_strategy: str = "mean"
+    pooling_strategy: str = "mean",
+    layers: list[int] = None,
+    layer_op: str = "mean"
 ) -> None:
     """Executes the batch embedding generation process."""
+    if layers is None:
+        layers = [-1]
     status_container = st.empty()
-    status_container.info(f"Starting embedding generation for {model_name} (pooling: {pooling_strategy})...")
+    layers_str = ",".join(str(l) for l in layers)
+    status_container.info(f"Starting embedding generation for {model_name} (pooling: {pooling_strategy}, layers: [{layers_str}], layer_op: {layer_op})...")
 
     log_container = st.empty()
     logs = []
@@ -618,6 +623,8 @@ def run_batch_embedding_process(
                 test_mode=test_mode,
                 tqdm_class=stqdm,
                 pooling_strategy=pooling_strategy,
+                layers=layers,
+                layer_op=layer_op,
             )
         status_container.success("Batch Processing Complete!")
     except Exception as e:
@@ -697,7 +704,8 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
 
         run_batch_embedding_process(
             config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
-            test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy
+            test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy,
+            layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean")
         )
 
 
