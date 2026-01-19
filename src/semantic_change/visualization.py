@@ -539,7 +539,7 @@ class Visualizer:
         fig = go.Figure()
         fig.add_trace(edge_trace)
 
-        # Add centroid as its own trace
+        # Add centroid as its own trace (not in legend)
         centroid_x, centroid_y = pos[0]
         fig.add_trace(go.Scatter(
             x=[centroid_x],
@@ -554,7 +554,8 @@ class Visualizer:
                 symbol='star',
                 line=dict(width=1, color='black')
             ),
-            hoverinfo='text'
+            hoverinfo='text',
+            showlegend=False
         ))
 
         # Group neighbors by period category
@@ -602,10 +603,13 @@ class Visualizer:
             template="plotly_white",
             showlegend=True,
             legend=dict(
-                yanchor="top",
-                y=0.99,
+                yanchor="bottom",
+                y=0.01,
                 xanchor="left",
-                x=0.01
+                x=0.01,
+                font=dict(size=10),
+                itemsizing='constant',
+                tracegroupgap=2
             ),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
@@ -740,7 +744,7 @@ class Visualizer:
                 showlegend=False
             ))
 
-        # Add centroid as its own trace
+        # Add centroid as its own trace (not in legend)
         centroid_x, centroid_y = pos[0]
         fig.add_trace(go.Scatter(
             x=[centroid_x],
@@ -755,7 +759,8 @@ class Visualizer:
                 symbol='star',
                 line=dict(width=1, color='black')
             ),
-            hoverinfo='text'
+            hoverinfo='text',
+            showlegend=False
         ))
 
         # Group neighbors by period category
@@ -803,15 +808,18 @@ class Visualizer:
             template="plotly_white",
             showlegend=True,
             legend=dict(
-                yanchor="top",
-                y=0.99,
+                yanchor="bottom",
+                y=0.01,
                 xanchor="left",
-                x=0.01
+                x=0.01,
+                font=dict(size=10),
+                itemsizing='constant',
+                tracegroupgap=2
             ),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(
-                showgrid=False, 
-                zeroline=False, 
+                showgrid=False,
+                zeroline=False,
                 showticklabels=False,
                 scaleanchor="x",
                 scaleratio=1
