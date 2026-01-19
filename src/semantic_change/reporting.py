@@ -132,23 +132,14 @@ def generate_comparison_report(
     # Sort by availability (primary) and min frequency (secondary) descending
     data.sort(key=lambda x: (x["has_embeddings"], x["min_freq"]), reverse=True)
 
-    # Markdown Table Header
-    if include_semantic_change:
-        lines.append(
-            f"| Lemma | POS | Freq ({name1}) | %Docs ({name1}) | Freq ({name2}) | %Docs ({name2}) | Min Freq | Semantic Change |")
-        lines.append(f"|---|---|---|---|---|---|---|---|")
-    else:
-        lines.append(
-            f"| Lemma | POS | Freq ({name1}) | %Docs ({name1}) | Freq ({name2}) | %Docs ({name2}) | Min Freq |")
-        lines.append(f"|---|---|---|---|---|---|---|")
-
     # Build rows for both markdown and dataframe
     df_rows = []
 
     # Process only top_n items
     items_to_process = data[:top_n]
 
-    with tqdm_class(items_to_process, desc="Processing words") as pbar:
+    pbar = tqdm_class(items_to_process, desc="Processing words")
+    try:
         for item in pbar:
             pbar.set_postfix_str(item['lemma'])
 
@@ -157,11 +148,6 @@ def generate_comparison_report(
                 sem_change = compute_semantic_change(
                     coll_t1, coll_t2, item["lemma"], vector_store, pos=item["pos"]
                 )
-                sem_change_str = f"{sem_change:.3f}" if sem_change is not None else "N/A"
-                row = f"| {item['lemma']} | {item['pos']} | {item['freq1']} | {item['pct1']:.1f}% | {item['freq2']} | {item['pct2']:.1f}% | {item['min_freq']} | {sem_change_str} |"
-            else:
-                row = f"| {item['lemma']} | {item['pos']} | {item['freq1']} | {item['pct1']:.1f}% | {item['freq2']} | {item['pct2']:.1f}% | {item['min_freq']} |"
-            lines.append(row)
 
             # Build dataframe row
             df_row = {
@@ -176,6 +162,35 @@ def generate_comparison_report(
             if include_semantic_change:
                 df_row["Semantic Change"] = sem_change
             df_rows.append(df_row)
+    finally:
+        try:
+            pbar.close()
+        except AttributeError:
+            pass  # stqdm may not have initialized fully
+
+    # Sort by Semantic Change descending if available
+    if include_semantic_change:
+        df_rows.sort(key=lambda x: (x["Semantic Change"] is not None, x["Semantic Change"] or 0), reverse=True)
+
+    # Markdown Table Header
+    if include_semantic_change:
+        lines.append(
+            f"| Lemma | POS | Freq ({name1}) | %Docs ({name1}) | Freq ({name2}) | %Docs ({name2}) | Min Freq | Semantic Change |")
+        lines.append(f"|---|---|---|---|---|---|---|---|")
+    else:
+        lines.append(
+            f"| Lemma | POS | Freq ({name1}) | %Docs ({name1}) | Freq ({name2}) | %Docs ({name2}) | Min Freq |")
+        lines.append(f"|---|---|---|---|---|---|---|")
+
+    # Build markdown rows from sorted data
+    for df_row in df_rows:
+        if include_semantic_change:
+            sem_change = df_row["Semantic Change"]
+            sem_change_str = f"{sem_change:.3f}" if sem_change is not None else "N/A"
+            row = f"| {df_row['Lemma']} | {df_row['POS']} | {df_row[f'Freq ({name1})']} | {df_row[f'%Docs ({name1})']}% | {df_row[f'Freq ({name2})']} | {df_row[f'%Docs ({name2})']}% | {df_row['Min Freq']} | {sem_change_str} |"
+        else:
+            row = f"| {df_row['Lemma']} | {df_row['POS']} | {df_row[f'Freq ({name1})']} | {df_row[f'%Docs ({name1})']}% | {df_row[f'Freq ({name2})']} | {df_row[f'%Docs ({name2})']}% | {df_row['Min Freq']} |"
+        lines.append(row)
 
     report_content = "\n".join(lines)
 
