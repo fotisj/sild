@@ -664,6 +664,8 @@ def get_chroma_neighbors(
     """
     Find nearest neighbors by querying the vector store.
 
+    Neighbors are ranked by mean distance to the centroid (closest first).
+
     Args:
         vector_store: VectorStore instance
         collection_name: Collection to query
@@ -673,7 +675,7 @@ def get_chroma_neighbors(
         max_candidates: Maximum candidates to consider
 
     Returns:
-        Dict mapping lemma to dict with 'vector' (mean embedding) and 'count' (occurrences)
+        Dict mapping lemma to dict with 'vector' (mean embedding), 'count', and 'mean_distance'
     """
     skip_lemmas = set()
     if target_word:
@@ -693,7 +695,8 @@ def get_chroma_neighbors(
         return {}
 
     metas = results['metadatas'][0]
-    
+    distances = results.get('distances', [[]])[0]
+
     # Safely extract IDs and convert to standard Python list
     ids_raw = results.get('ids', [[]])[0]
     ids = []
@@ -702,33 +705,47 @@ def get_chroma_neighbors(
             ids = ids_raw.tolist()
         else:
             ids = list(ids_raw)
-    
-    # 1. Identify top candidate lemmas based on frequency in the nearest neighbor results
-    lemma_counts = Counter()
+
+    # 1. Collect distances and IDs per lemma
+    lemma_distances = defaultdict(list)
     lemma_ids = defaultdict(list)
-    
+
     for i, m in enumerate(metas):
         lemma = m.get('lemma', '').lower()
         if not lemma or len(lemma) < 2:
             continue
         if lemma in skip_lemmas:
             continue
-        lemma_counts[lemma] += 1
-        
-        # Only collect ID if available and index is within bounds
-        if len(ids) > i:
-            lemma_ids[lemma].append(str(ids[i]))  # Ensure ID is string
 
-    # Get top candidates (fetch a few more than needed to handle potential fetch failures)
-    candidate_lemmas = [l for l, _ in lemma_counts.most_common(n_neighbors + 5)]
-    
+        # Track distance for this occurrence
+        if i < len(distances):
+            lemma_distances[lemma].append(distances[i])
+
+        # Collect ID if available
+        if len(ids) > i:
+            lemma_ids[lemma].append(str(ids[i]))
+
+    # 2. Compute mean distance per lemma and sort by it (ascending = closest first)
+    lemma_stats = {}
+    for lemma, dists in lemma_distances.items():
+        lemma_stats[lemma] = {
+            'mean_distance': np.mean(dists),
+            'count': len(dists)
+        }
+
+    # Sort by mean distance (closest first)
+    sorted_lemmas = sorted(lemma_stats.keys(), key=lambda x: lemma_stats[x]['mean_distance'])
+
+    # Take more candidates than needed to handle potential fetch failures
+    candidate_lemmas = sorted_lemmas[:n_neighbors + 10]
+
     final_results = {}
-    
-    # 2. Fetch actual embeddings for these candidates using the specific IDs found
+
+    # 3. Fetch actual embeddings for top candidates
     for lemma in candidate_lemmas:
         if len(final_results) >= n_neighbors:
             break
-            
+
         try:
             ids_to_fetch = lemma_ids[lemma]
             if not ids_to_fetch:
@@ -736,20 +753,21 @@ def get_chroma_neighbors(
 
             # Fetch the specific embedding instances that were close to the centroid
             lemma_data = vector_store.get_by_ids(
-                collection_name, 
+                collection_name,
                 ids=ids_to_fetch
             )
-            
+
             if lemma_data and lemma_data.get('embeddings') is not None:
                 embs = lemma_data['embeddings']
                 if len(embs) > 0:
                     # Calculate mean vector for the lemma
                     embs_array = np.array(embs)
                     mean_vec = np.mean(embs_array, axis=0)
-                    
+
                     final_results[lemma] = {
                         'vector': mean_vec,
-                        'count': lemma_counts[lemma]
+                        'count': lemma_stats[lemma]['count'],
+                        'mean_distance': lemma_stats[lemma]['mean_distance']
                     }
         except Exception as e:
             print(f"Failed to fetch embeddings for neighbor '{lemma}': {e}")
@@ -849,18 +867,20 @@ def create_neighbor_plots(
                     target_word=target_word, n_neighbors=k_neighbors
                 )
 
-                # Merge neighbors from both periods, tracking counts
+                # Merge neighbors from both periods, tracking distances
                 all_lemmas = set(n1.keys()) | set(n2.keys())
                 merged_data = {}
 
                 for lemma in all_lemmas:
                     count_t1 = n1.get(lemma, {}).get('count', 0)
                     count_t2 = n2.get(lemma, {}).get('count', 0)
+                    dist_t1 = n1.get(lemma, {}).get('mean_distance', float('inf'))
+                    dist_t2 = n2.get(lemma, {}).get('mean_distance', float('inf'))
 
-                    # Use vector from whichever period has more occurrences,
+                    # Use vector from whichever period has smaller distance (closer),
                     # or average if both exist
                     if lemma in n1 and lemma in n2:
-                        # Weighted average of vectors
+                        # Weighted average of vectors by inverse distance
                         v1 = n1[lemma]['vector']
                         v2 = n2[lemma]['vector']
                         total = count_t1 + count_t2
@@ -873,14 +893,14 @@ def create_neighbor_plots(
                     merged_data[lemma] = {
                         'vector': merged_vec,
                         'count_t1': count_t1,
-                        'count_t2': count_t2
+                        'count_t2': count_t2,
+                        'min_distance': min(dist_t1, dist_t2)
                     }
 
-                # Sort by total count and take top k_neighbors * 2
+                # Sort by minimum distance (closest first) and take top k_neighbors * 2
                 sorted_lemmas = sorted(
                     merged_data.keys(),
-                    key=lambda x: merged_data[x]['count_t1'] + merged_data[x]['count_t2'],
-                    reverse=True
+                    key=lambda x: merged_data[x]['min_distance']
                 )[:k_neighbors * 2]
 
                 for lemma in sorted_lemmas:
