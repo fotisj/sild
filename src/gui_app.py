@@ -597,44 +597,48 @@ def run_batch_embedding_process(
     """Executes the batch embedding generation process."""
     if layers is None:
         layers = [-1]
-    status_container = st.empty()
     layers_str = ",".join(str(l) for l in layers)
     action_str = "Resuming" if resume else "Starting"
-    status_container.info(f"{action_str} embedding generation for {model_name} (pooling: {pooling_strategy}, layers: [{layers_str}], layer_op: {layer_op})...")
 
-    log_container = st.empty()
-    logs = []
+    # Use st.status for better progress visibility during long operations
+    with st.status(f"{action_str} embedding generation...", expanded=True) as status:
+        st.write(f"**Model:** {model_name}")
+        st.write(f"**Pooling:** {pooling_strategy}, **Layers:** [{layers_str}], **Layer op:** {layer_op}")
 
-    def update_log(text):
-        logs.append(text)
-        # Keep only last 30 lines to avoid UI lag
-        log_container.code("".join(logs[-30:]))
+        log_placeholder = st.empty()
+        logs = []
 
-    try:
-        from semantic_change.embeddings_generation import run_batch_generation
+        def update_log(text):
+            if text.strip():  # Only update for non-empty text
+                logs.append(text)
+                # Keep only last 50 lines
+                log_placeholder.code("".join(logs[-50:]), language=None)
 
-        with capture_output(update_log):
-            run_batch_generation(
-                project_id=project_id,
-                db_path_t1=db_t1,
-                db_path_t2=db_t2,
-                model_name=model_name,
-                min_freq=min_freq,
-                max_samples=max_samples,
-                additional_words=custom_words,
-                reset_collections=not resume,  # Do not reset if resuming
-                test_mode=test_mode,
-                tqdm_class=stqdm,
-                pooling_strategy=pooling_strategy,
-                layers=layers,
-                layer_op=layer_op,
-                staged=staged,
-                resume=resume
-            )
-        status_container.success("Batch Processing Complete!")
-    except Exception as e:
-        status_container.error(f"Batch process failed: {e}")
-        st.code(traceback.format_exc(), language="python")
+        try:
+            from semantic_change.embeddings_generation import run_batch_generation
+
+            with capture_output(update_log):
+                run_batch_generation(
+                    project_id=project_id,
+                    db_path_t1=db_t1,
+                    db_path_t2=db_t2,
+                    model_name=model_name,
+                    min_freq=min_freq,
+                    max_samples=max_samples,
+                    additional_words=custom_words,
+                    reset_collections=not resume,  # Do not reset if resuming
+                    test_mode=test_mode,
+                    tqdm_class=stqdm,
+                    pooling_strategy=pooling_strategy,
+                    layers=layers,
+                    layer_op=layer_op,
+                    staged=staged,
+                    resume=resume
+                )
+            status.update(label="Batch Processing Complete!", state="complete", expanded=False)
+        except Exception as e:
+            status.update(label=f"Batch process failed: {e}", state="error", expanded=True)
+            st.code(traceback.format_exc(), language="python")
 
 
 def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
@@ -889,23 +893,26 @@ def render_db_stats_summary(config: dict, db_t1: str, db_t2: str, period_t1_labe
             unique_words = "N/A"
             threshold = config.get("min_freq", "N/A")
 
-            # Skip loading all metadata if collection is large (>10k embeddings)
-            # as it can crash the app on systems with limited memory
-            if total_embeddings < 10000:
-                try:
-                    # Fetch only metadatas for both collections to count unique lemmas
-                    c1 = store.get_or_create_collection(coll_t1)
-                    c2 = store.get_or_create_collection(coll_t2)
+            # Count unique lemmas using batched queries to avoid memory issues
+            try:
+                c1 = store.get_or_create_collection(coll_t1)
+                c2 = store.get_or_create_collection(coll_t2)
 
-                    m1 = c1.get(include=["metadatas"])["metadatas"]
-                    m2 = c2.get(include=["metadatas"])["metadatas"]
+                all_lemmas = set()
+                batch_size = 10000
 
-                    all_lemmas = set()
-                    for m in m1: all_lemmas.add(m.get("lemma"))
-                    for m in m2: all_lemmas.add(m.get("lemma"))
-                    unique_words = len(all_lemmas)
-                except Exception:
-                    unique_words = "N/A"
+                # Process each collection in batches
+                for coll, count in [(c1, count_t1), (c2, count_t2)]:
+                    if count == 0:
+                        continue
+                    for offset in range(0, count, batch_size):
+                        batch = coll.get(include=["metadatas"], limit=batch_size, offset=offset)["metadatas"]
+                        for m in batch:
+                            all_lemmas.add(m.get("lemma"))
+
+                unique_words = len(all_lemmas)
+            except Exception as e:
+                unique_words = f"N/A ({e})"
 
             st.code(
                 f"Chroma ({model}):\n"

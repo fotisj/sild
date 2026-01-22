@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 import torch
 import numpy as np
 import os
@@ -288,11 +289,18 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
                 batch_items = None
 
     if batch_items is None:
+        print(f"  [{time.strftime('%H:%M:%S')}] Collecting sentences for {len(target_words)} words...")
+        import sys
+        sys.stdout.flush()
         batch_items = collect_sentences_for_words(db_path, target_words, max_samples=max_samples,
                                                    pos_filter=pos_filter, tqdm_class=tqdm_class)
+        print(f"  [{time.strftime('%H:%M:%S')}] Collected {len(batch_items)} sentence batches. Saving plan...")
+        sys.stdout.flush()
         # Save plan for potential resume
         with open(plan_path, 'w') as f:
             json.dump(batch_items, f)
+        print(f"  [{time.strftime('%H:%M:%S')}] Plan saved.")
+        sys.stdout.flush()
 
     total_sents = len(batch_items)
     if total_sents == 0:
@@ -303,9 +311,9 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
     chunk_size = 500
     if embed_batch_size is None:
         embed_batch_size = detect_optimal_batch_size()
-        print(f"  Auto-detected embedding batch size: {embed_batch_size}")
+        print(f"  [{time.strftime('%H:%M:%S')}] Auto-detected embedding batch size: {embed_batch_size}")
     else:
-        print(f"  Using specified embedding batch size: {embed_batch_size}")
+        print(f"  [{time.strftime('%H:%M:%S')}] Using specified embedding batch size: {embed_batch_size}")
 
     desc = f"Processing {os.path.basename(db_path)} -> NPZ"
     total_written = 0
@@ -333,15 +341,21 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
                 chunk_idx = 0
                 start_item_idx = 0
 
+    total_chunks = (total_sents - start_item_idx + chunk_size - 1) // chunk_size
+    print(f"  [TERMINAL] Starting embedding extraction: {total_sents} sentences, {total_chunks} chunks", file=sys.__stdout__)
+    sys.__stdout__.flush()
+
     with tqdm_class(total=total_sents, initial=start_item_idx, desc=desc) as pbar:
         for i in range(start_item_idx, total_sents, chunk_size):
-            print(f"  [DEBUG] Processing chunk {chunk_idx} (items {i} to {min(i+chunk_size, total_sents)})...")
+            print(f"  [TERMINAL] Chunk {chunk_idx+1}/{total_chunks} (items {i}-{min(i+chunk_size, total_sents)})...", file=sys.__stdout__)
+            sys.__stdout__.flush()
             chunk = batch_items[i : i + chunk_size]
-            
+
             t0 = time.time()
             chunk_results = embedder.batch_extract(chunk, batch_size=embed_batch_size)
             dt = time.time() - t0
-            print(f"  [DEBUG] Batch extraction finished in {dt:.2f}s. Results: {len(chunk_results)} items.")
+            print(f"  [TERMINAL] Chunk done in {dt:.2f}s. Got {len(chunk_results)} embeddings.", file=sys.__stdout__)
+            sys.__stdout__.flush()
 
             if chunk_results:
                 # Prepare data for NPZ
@@ -607,6 +621,10 @@ def run_batch_generation(
         delete_staging_after_import: If True, delete NPZ files after successful import.
         resume: If True, attempt to resume from existing staged files and plan.
     """
+    import sys
+    print(f"[{time.strftime('%H:%M:%S')}] run_batch_generation() started")
+    print(f"  project_id={project_id}, model={model_name}, staged={staged}, resume={resume}")
+    sys.stdout.flush()
 
     # Handle legacy args
     if db_path_1800: db_path_t1 = db_path_1800
@@ -625,7 +643,6 @@ def run_batch_generation(
         pos_filter = 'NOUN'  # Only nouns in test mode
 
     start_time = time.time()
-    import sys
 
     coll_t1 = get_collection_name(project_id, "t1", model_name)
     coll_t2 = get_collection_name(project_id, "t2", model_name)
@@ -660,19 +677,23 @@ def run_batch_generation(
         return
 
     # Normal mode: generate embeddings
-    print(f"Initializing ChromaDB Vector Store with target POS: {pos_filter}...")
+    print(f"[{time.strftime('%H:%M:%S')}] Initializing ChromaDB Vector Store with target POS: {pos_filter}...")
     sys.stdout.flush()
     vector_store = VectorStore(persistence_path="data/chroma_db")
-
-    # Read spaCy model from database metadata (for neighbor filtering)
-    spacy_model = get_spacy_model_from_db(db_path_t1)
-    if spacy_model:
-        print(f"Using spaCy model from corpus metadata: {spacy_model}")
-    else:
-        print("No spaCy model found in corpus metadata, using defaults.")
+    print(f"[{time.strftime('%H:%M:%S')}] ChromaDB initialized.")
     sys.stdout.flush()
 
-    print(f"Loading embedding model '{model_name}'... (this may take a while for large models)")
+    # Read spaCy model from database metadata (for neighbor filtering)
+    print(f"[{time.strftime('%H:%M:%S')}] Reading spaCy model from DB metadata...")
+    sys.stdout.flush()
+    spacy_model = get_spacy_model_from_db(db_path_t1)
+    if spacy_model:
+        print(f"[{time.strftime('%H:%M:%S')}] Using spaCy model from corpus metadata: {spacy_model}")
+    else:
+        print(f"[{time.strftime('%H:%M:%S')}] No spaCy model found in corpus metadata, using defaults.")
+    sys.stdout.flush()
+
+    print(f"[{time.strftime('%H:%M:%S')}] Loading embedding model '{model_name}'... (this may take a while)")
     sys.stdout.flush()
     embedder = BertEmbedder(
         model_name=model_name,
@@ -681,7 +702,7 @@ def run_batch_generation(
         layers=layers,
         layer_op=layer_op
     )
-    print("Embedding model loaded successfully.")
+    print(f"[{time.strftime('%H:%M:%S')}] Embedding model loaded successfully.")
     sys.stdout.flush()
 
     if reset_collections:
@@ -702,13 +723,16 @@ def run_batch_generation(
         vector_store.get_or_create_collection(coll_t1, metadata={"model_name": model_name})
         vector_store.get_or_create_collection(coll_t2, metadata={"model_name": model_name})
 
+    print(f"[{time.strftime('%H:%M:%S')}] Finding target words (min_freq={min_freq}, pos={pos_filter})...")
+    sys.stdout.flush()
+
     if test_mode:
         # Get shared words for test mode (same words in both periods)
         shared_words = get_shared_words(db_path_t1, db_path_t2, min_freq=min_freq, pos_filter=pos_filter)
         if len(shared_words) > test_num_words:
             import random
             shared_words = random.sample(shared_words, test_num_words)
-        print(f"Test mode: Selected {len(shared_words)} shared nouns: {shared_words[:10]}...")
+        print(f"[{time.strftime('%H:%M:%S')}] Test mode: Selected {len(shared_words)} shared nouns: {shared_words[:10]}...")
         words_t1 = shared_words
         words_t2 = shared_words
     else:
@@ -716,31 +740,38 @@ def run_batch_generation(
         words_t1 = get_frequent_words(db_path_t1, min_freq=min_freq, pos_filter=pos_filter)
         if additional_words:
             words_t1 = sorted(list(set(words_t1 + additional_words)))
+        print(f"[{time.strftime('%H:%M:%S')}] Found {len(words_t1)} words in T1")
+        sys.stdout.flush()
 
         # --- Period 2 ---
         words_t2 = get_frequent_words(db_path_t2, min_freq=min_freq, pos_filter=pos_filter)
         if additional_words:
             words_t2 = sorted(list(set(words_t2 + additional_words)))
+        print(f"[{time.strftime('%H:%M:%S')}] Found {len(words_t2)} words in T2")
+        sys.stdout.flush()
 
     if staged:
         # Staged mode: write to NPZ files first
-        print(f"\n=== STAGED MODE: Writing embeddings to {staging_dir} ===")
+        print(f"\n[{time.strftime('%H:%M:%S')}] === STAGED MODE: Writing embeddings to {staging_dir} ===")
+        sys.stdout.flush()
         os.makedirs(staging_dir, exist_ok=True)
 
-        print(f"\n--- Processing T1 Corpus -> NPZ (Collection: {coll_t1}) ---")
+        print(f"\n[{time.strftime('%H:%M:%S')}] --- Processing T1 Corpus -> NPZ (Collection: {coll_t1}) ---")
+        sys.stdout.flush()
         process_corpus_staged(db_path_t1, coll_t1, words_t1, embedder, staging_dir,
                               max_samples=max_samples, pos_filter=pos_filter,
                               embed_batch_size=embed_batch_size, tqdm_class=tqdm_class,
                               resume=resume)
 
-        print(f"\n--- Processing T2 Corpus -> NPZ (Collection: {coll_t2}) ---")
+        print(f"\n[{time.strftime('%H:%M:%S')}] --- Processing T2 Corpus -> NPZ (Collection: {coll_t2}) ---")
+        sys.stdout.flush()
         process_corpus_staged(db_path_t2, coll_t2, words_t2, embedder, staging_dir,
                               max_samples=max_samples, pos_filter=pos_filter,
                               embed_batch_size=embed_batch_size, tqdm_class=tqdm_class,
                               resume=resume)
 
         # Now bulk import to ChromaDB
-        print(f"\n=== Bulk importing staged embeddings to ChromaDB ===")
+        print(f"\n[{time.strftime('%H:%M:%S')}] === Bulk importing staged embeddings to ChromaDB ===")
         results = bulk_import_from_staging(
             staging_dir=staging_dir,
             vector_store=vector_store,

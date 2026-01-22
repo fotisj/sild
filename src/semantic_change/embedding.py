@@ -1,4 +1,5 @@
 import os
+import sys
 # Suppress HuggingFace xet storage warning (falls back to HTTP which works fine)
 os.environ["HF_HUB_DISABLE_XET_WARNING"] = "1"
 
@@ -58,30 +59,31 @@ def detect_optimal_dtype() -> Optional[torch.dtype]:
 def detect_optimal_batch_size() -> int:
     """
     Detects an optimal batch size based on available GPU VRAM.
+    Memory cleanup between batches allows for larger batch sizes.
 
     Returns:
         Recommended batch size for embedding extraction.
-        - 512 for GPUs with 40GB+ VRAM (A100, L40, etc.)
-        - 256 for GPUs with 24GB+ VRAM (RTX 3090/4090, A5000, etc.)
-        - 128 for GPUs with 12GB+ VRAM (RTX 3080, etc.)
-        - 64 for GPUs with less VRAM or CPU
+        - 256 for GPUs with 40GB+ VRAM (A100, L40, etc.)
+        - 128 for GPUs with 24GB+ VRAM (RTX 3090/4090, A5000, etc.)
+        - 64 for GPUs with 12GB+ VRAM (RTX 3080, etc.)
+        - 32 for GPUs with less VRAM or CPU
     """
     if not torch.cuda.is_available():
-        return 64
+        return 32
 
     try:
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
 
         if vram_gb >= 40:
-            return 512
-        elif vram_gb >= 24:
             return 256
-        elif vram_gb >= 12:
+        elif vram_gb >= 24:
             return 128
-        else:
+        elif vram_gb >= 12:
             return 64
+        else:
+            return 32
     except Exception:
-        return 128
+        return 64
 
 class Embedder:
     """Base class for embedding generation."""
@@ -430,6 +432,7 @@ class BertEmbedder(Embedder):
         - 'weighted': Position-weighted pooling
         - 'lemma_replacement': Replace target with lemma in text before embedding (TokLem)
         """
+        import time as time_module
         results = []
 
         # For lemma_replacement strategy, preprocess items to replace targets with lemmas
@@ -438,12 +441,32 @@ class BertEmbedder(Embedder):
 
         # We process in batches to leverage GPU
         total_batches = (len(items) + batch_size - 1) // batch_size
-        print(f"    [DEBUG] Starting batch_extract for {len(items)} items in {total_batches} batches (batch_size={batch_size})...")
-        
+        # Print to terminal (bypassing Streamlit capture)
+        print(f"    [batch_extract] {len(items)} items in {total_batches} batches (size={batch_size})", file=sys.__stdout__)
+        sys.__stdout__.flush()
+
+        batch_start_time = time_module.time()
+
         for i in range(0, len(items), batch_size):
-            if i % (batch_size * 5) == 0: # Print every 5th batch to avoid spam
-                print(f"    [DEBUG] Processing internal batch {i // batch_size + 1}/{total_batches}...")
-                
+            batch_num = i // batch_size + 1
+            elapsed = time_module.time() - batch_start_time
+
+            # Memory monitoring
+            if torch.cuda.is_available():
+                mem_alloc = torch.cuda.memory_allocated() / 1024**3
+                mem_reserved = torch.cuda.memory_reserved() / 1024**3
+                mem_info = f" [GPU: {mem_alloc:.1f}GB alloc, {mem_reserved:.1f}GB reserved]"
+            else:
+                mem_info = ""
+
+            if batch_num == 1:
+                print(f"    [batch_extract] Batch {batch_num}/{total_batches}...{mem_info}", file=sys.__stdout__)
+            else:
+                avg = elapsed / (batch_num - 1)
+                rem = avg * (total_batches - batch_num + 1)
+                print(f"    [batch_extract] Batch {batch_num}/{total_batches} (avg {avg:.1f}s, ~{rem:.0f}s left){mem_info}", file=sys.__stdout__)
+            sys.__stdout__.flush()
+
             batch_items = items[i : i + batch_size]
             batch_texts = [x['text'] for x in batch_items]
             batch_targets = [x['targets'] for x in batch_items]
@@ -531,11 +554,20 @@ class BertEmbedder(Embedder):
             if batch_word_vecs:
                 stacked = torch.stack(batch_word_vecs)  # (N, dim) on GPU
                 numpy_vecs = stacked.detach().cpu().numpy()  # Single transfer
+                del stacked  # Free GPU memory
 
                 for idx, meta in enumerate(batch_metadata):
                     meta["vector"] = numpy_vecs[idx]
                     results.append(meta)
 
+            # Clean up GPU memory to prevent slowdown
+            del hidden_states, outputs, input_ids, attention_mask
+            if batch_word_vecs:
+                del batch_word_vecs
+            torch.cuda.empty_cache()
+
+        print(f"    [batch_extract] Done. {len(results)} embeddings extracted.", file=sys.__stdout__)
+        sys.__stdout__.flush()
         return results
 
     def get_embeddings(self, samples: List[Dict[str, Any]]) -> Tuple[np.ndarray, List[str]]:
