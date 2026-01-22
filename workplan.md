@@ -208,6 +208,16 @@ Implement the graph-based Word Sense Induction approach based on "Large Scale Su
     - Updated files: `embeddings_generation.py`, `ingestor.py`, `run_ingest.py`, `reporting.py`, `rank_semantic_change.py`, `gui_app.py`
     - CLI uses standard `tqdm`, GUI uses `stqdm` (passed as `tqdm_class=stqdm`)
 
+- [ ] **Logging for embedding generation**: Terminal debug output (currently going to `sys.__stdout__`) should be redirected to a log file with toggle option:
+    - Add config option to enable/disable detailed logging
+    - Write logs to `data/logs/embedding_YYYYMMDD_HHMMSS.log`
+    - For normal use, the GUI progress bar is sufficient
+    - Keep terminal output available for debugging when needed
+
+- [ ] **GUI progress display formatting**: Info on progress in GUI has very long lines that are hard to read:
+    - Add line breaks to status messages
+    - Consider truncating or wrapping long model names and paths
+
 
 ## VIII. Future Tasks
 At the moment the context for the computation of an embedding and also for the viz of a lemma occurrence is always a sentence. We want to change this:
