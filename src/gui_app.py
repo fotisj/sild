@@ -1169,12 +1169,71 @@ def render_wsi_parameters(config: dict) -> dict:
             params["clustering_n_components"] = config.get("clustering_n_components", 50)
 
         # Clustering algorithm
-        wsi_options = ["hdbscan", "kmeans", "spectral", "agglomerative"]
+        wsi_options = ["hdbscan", "kmeans", "spectral", "agglomerative", "substitute"]
+        current_algo = config["wsi_algorithm"]
+        if current_algo not in wsi_options:
+            current_algo = "hdbscan"
         params["wsi_algorithm"] = st.selectbox(
             "Clustering Algorithm",
             options=wsi_options,
-            index=wsi_options.index(config["wsi_algorithm"]),
+            index=wsi_options.index(current_algo),
         )
+
+        # Show info message and filter model selector for substitute-based WSI
+        if params["wsi_algorithm"] == "substitute":
+            st.info(
+                "ℹ️ **Substitute-based WSI** (Eyal et al., 2022): Uses MLM top-k substitutes "
+                "and graph community detection instead of embedding clustering. "
+                "Senses are represented by interpretable word lists. "
+                "Number of senses is determined automatically by Louvain algorithm."
+            )
+
+            # Filter model selector for substitute WSI
+            filter_model_options = [
+                "en_core_web_sm",
+                "en_core_web_lg",
+                "de_core_news_sm",
+                "de_core_news_lg",
+                "Other (Custom)",
+            ]
+            current_filter = config.get("substitute_filter_model", "en_core_web_sm")
+            if current_filter and current_filter not in filter_model_options[:-1]:
+                default_idx = filter_model_options.index("Other (Custom)")
+            elif current_filter:
+                default_idx = filter_model_options.index(current_filter)
+            else:
+                default_idx = 0
+
+            selected_filter = st.selectbox(
+                "Filter Model (for stopwords/lemmatization)",
+                filter_model_options,
+                index=default_idx,
+                help="spaCy model used for filtering stopwords and lemmatizing substitutes. "
+                     "Use a model appropriate for your corpus language/time period."
+            )
+
+            if selected_filter == "Other (Custom)":
+                params["substitute_filter_model"] = st.text_input(
+                    "Custom spaCy Model",
+                    value=current_filter if current_filter not in filter_model_options[:-1] else "",
+                    help="e.g., fr_core_news_sm, es_core_news_lg"
+                )
+            else:
+                params["substitute_filter_model"] = selected_filter
+
+            # Merge threshold for combining similar communities
+            params["substitute_merge_threshold"] = st.slider(
+                "Merge Threshold (Jaccard)",
+                min_value=0.0,
+                max_value=0.6,
+                value=config.get("substitute_merge_threshold", 0.3),
+                step=0.05,
+                help="Communities with Jaccard similarity >= threshold on their top representatives "
+                     "will be merged. 0.0 = no merging. Typical values: 0.2 (conservative) to 0.4 (aggressive)."
+            )
+        else:
+            params["substitute_filter_model"] = config.get("substitute_filter_model")
+            params["substitute_merge_threshold"] = config.get("substitute_merge_threshold", 0.0)
 
         if params["wsi_algorithm"] == "hdbscan":
             params["min_cluster_size"] = st.number_input(
@@ -1183,7 +1242,18 @@ def render_wsi_parameters(config: dict) -> dict:
                 value=config["min_cluster_size"],
             )
             params["n_clusters"] = config["n_clusters"]
+        elif params["wsi_algorithm"] == "substitute":
+            # Substitute WSI determines clusters automatically via Louvain
+            # min_cluster_size is used for min_community_size
+            params["min_cluster_size"] = st.number_input(
+                "Min Community Size",
+                min_value=2,
+                value=config["min_cluster_size"],
+                help="Minimum number of words to form a valid sense community."
+            )
+            params["n_clusters"] = config["n_clusters"]
         else:
+            # kmeans, spectral, agglomerative - need explicit n_clusters
             params["n_clusters"] = st.number_input(
                 "Number of Clusters (k)",
                 min_value=2,
@@ -1244,6 +1314,8 @@ def update_config_from_params(config: dict, params: dict) -> None:
     config["clustering_n_components"] = params.get("clustering_n_components", config["clustering_n_components"])
     config["viz_reduction"] = params.get("viz_reduction", config["viz_reduction"])
     config["k_neighbors"] = params.get("k_neighbors", config["k_neighbors"])
+    config["substitute_filter_model"] = params.get("substitute_filter_model", config.get("substitute_filter_model"))
+    config["substitute_merge_threshold"] = params.get("substitute_merge_threshold", config.get("substitute_merge_threshold", 0.0))
 
 
 def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_label: str, period_t2_label: str) -> None:
@@ -1283,6 +1355,8 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                     n_samples=params["n_samples"],
                     viz_max_instances=params["viz_max_instances"],
                     exact_match=params.get("exact_match", False),
+                    substitute_filter_model=params.get("substitute_filter_model"),
+                    substitute_merge_threshold=params.get("substitute_merge_threshold", 0.0),
                 )
 
             st.success("Analysis Complete!")
@@ -1331,6 +1405,7 @@ def display_visualizations(
         ("time_period.html", "⏳ Time Period Clustering"),
         ("sense_clusters.html", "🧩 Sense Clusters"),
         ("sense_time_combined.html", "🎨 Sense × Time (Combined)"),
+        ("substitute_graph.html", "🕸️ Substitute Co-occurrence Graph"),
     ]
 
     for base_filename, title in viz_files:

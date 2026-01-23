@@ -3,7 +3,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
+
+try:
+    import networkx as nx
+except ImportError:
+    nx = None
 
 try:
     import umap
@@ -831,3 +836,151 @@ class Visualizer:
             print(f"Neighbor graph saved to {save_path}")
         else:
             fig.show()
+
+    def plot_substitute_graph(
+        self,
+        graph,  # nx.Graph
+        communities: List[Set[str]],
+        title: str = "Substitute Co-occurrence Graph",
+        save_path: str = None,
+        max_nodes: int = 50
+    ) -> go.Figure:
+        """
+        Visualize the substitute co-occurrence graph with community coloring.
+
+        This shows the graph structure from SubstituteWSI where:
+        - Nodes are substitute words
+        - Edges connect substitutes that co-occurred for the same word instance
+        - Colors indicate sense communities detected by Louvain
+
+        Args:
+            graph: NetworkX graph from SubstituteWSI.graph_
+            communities: List of sets of representative words per sense
+            title: Plot title
+            save_path: Path to save HTML file (or None to display)
+            max_nodes: Maximum nodes to display (filtered by degree)
+
+        Returns:
+            Plotly Figure object
+        """
+        if nx is None:
+            print("Warning: networkx not available. Cannot plot substitute graph.")
+            return None
+
+        if graph is None or graph.number_of_nodes() == 0:
+            print("Warning: Empty graph. Nothing to plot.")
+            return None
+
+        # 1. Filter to top nodes by weighted degree
+        node_degrees = [(n, graph.degree(n, weight='weight')) for n in graph.nodes()]
+        node_degrees.sort(key=lambda x: x[1], reverse=True)
+        top_nodes = set(n for n, _ in node_degrees[:max_nodes])
+
+        # 2. Create subgraph
+        subgraph = graph.subgraph(top_nodes)
+
+        if subgraph.number_of_nodes() == 0:
+            print("Warning: Subgraph is empty after filtering.")
+            return None
+
+        # 3. Compute layout (spring layout works well for community structure)
+        pos = nx.spring_layout(subgraph, seed=42, k=2 / np.sqrt(len(top_nodes)))
+
+        # 4. Assign colors by community
+        node_colors = {}
+        color_palette = px.colors.qualitative.Set1
+
+        for node in subgraph.nodes():
+            assigned = False
+            for i, comm in enumerate(communities):
+                if node in comm:
+                    node_colors[node] = color_palette[i % len(color_palette)]
+                    assigned = True
+                    break
+            if not assigned:
+                node_colors[node] = 'gray'
+
+        # 5. Create edge traces
+        edge_traces = []
+        for u, v, data in subgraph.edges(data=True):
+            x0, y0 = pos[u]
+            x1, y1 = pos[v]
+            weight = data.get('weight', 1)
+            # Scale line width by weight (capped)
+            line_width = min(weight * 0.3, 4)
+            edge_traces.append(go.Scatter(
+                x=[x0, x1, None],
+                y=[y0, y1, None],
+                mode='lines',
+                line=dict(width=line_width, color='rgba(150,150,150,0.4)'),
+                hoverinfo='none',
+                showlegend=False
+            ))
+
+        # 6. Create node trace
+        node_x = [pos[n][0] for n in subgraph.nodes()]
+        node_y = [pos[n][1] for n in subgraph.nodes()]
+        node_text = list(subgraph.nodes())
+        node_color = [node_colors[n] for n in subgraph.nodes()]
+        # Node size based on degree
+        node_size = [
+            min(10 + subgraph.degree(n, weight='weight') * 0.3, 25)
+            for n in subgraph.nodes()
+        ]
+
+        node_trace = go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode='markers+text',
+            marker=dict(
+                size=node_size,
+                color=node_color,
+                line=dict(width=1, color='white')
+            ),
+            text=node_text,
+            textposition='top center',
+            textfont=dict(size=9),
+            hoverinfo='text',
+            showlegend=False
+        )
+
+        # 7. Create legend traces for communities
+        legend_traces = []
+        for i, comm in enumerate(communities):
+            # Create an invisible point for the legend
+            legend_traces.append(go.Scatter(
+                x=[None],
+                y=[None],
+                mode='markers',
+                marker=dict(
+                    size=10,
+                    color=color_palette[i % len(color_palette)]
+                ),
+                name=f"Sense {i}",
+                showlegend=True
+            ))
+
+        # 8. Create figure
+        fig = go.Figure(data=edge_traces + [node_trace] + legend_traces)
+        fig.update_layout(
+            title=title,
+            showlegend=True,
+            template='plotly_white',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01,
+                font=dict(size=10),
+                itemsizing='constant'
+            ),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            hovermode='closest'
+        )
+
+        if save_path:
+            fig.write_html(save_path)
+            print(f"Substitute graph saved to {save_path}")
+
+        return fig

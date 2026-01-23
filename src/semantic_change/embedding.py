@@ -241,6 +241,33 @@ class BertEmbedder(Embedder):
 
         return self._filter_nlp
 
+    def _download_spacy_model(self, model_name: str) -> None:
+        """
+        Download a spaCy model if not installed.
+
+        Args:
+            model_name: Name of the spaCy model to download
+
+        Raises:
+            OSError: If download fails
+        """
+        import subprocess
+        import sys
+
+        print(f"  Downloading spaCy model: {model_name}")
+        sys.stdout.flush()
+        result = subprocess.run(
+            [sys.executable, "-m", "spacy", "download", model_name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"  Download output: {result.stdout}")
+            print(f"  Download errors: {result.stderr}")
+            raise OSError(f"Failed to download spaCy model '{model_name}'. Check the model name is valid.")
+        print(f"  Successfully downloaded: {model_name}")
+        sys.stdout.flush()
+
     @property
     def mlm_model(self):
         """Property for backward compatibility - lazily loads MLM model."""
@@ -744,3 +771,243 @@ class BertEmbedder(Embedder):
                     break
 
         return results
+
+    def generate_substitutes(
+        self,
+        sentences: List[str],
+        target_spans: List[Tuple[int, int]],
+        k: int = 5,
+        filter_stopwords: bool = True,
+        lemmatize: bool = True,
+        batch_size: int = 32,
+        tqdm_class=None,
+        filter_model: str = None
+    ) -> List[List[str]]:
+        """
+        Generate top-k MLM substitutes for the target word in each sentence.
+
+        Based on Eyal et al., 2022 "Large Scale Substitution-based Word Sense Induction".
+
+        Args:
+            sentences: List of sentence texts
+            target_spans: List of (start_char, end_char) tuples for target word in each sentence
+            k: Number of substitutes to return per sentence
+            filter_stopwords: Whether to filter out stopwords from substitutes
+            lemmatize: Whether to lemmatize substitutes (recommended for graph construction)
+            batch_size: Batch size for processing
+            tqdm_class: Optional tqdm class for progress display (e.g., stqdm for Streamlit)
+            filter_model: spaCy model name for stopword filtering and lemmatization.
+                         If None, uses the embedder's default filter model.
+                         Examples: 'en_core_web_sm', 'en_core_web_lg', 'de_core_news_sm'
+
+        Returns:
+            List of lists: [[sub1, sub2, ...], ...] for each sentence
+        """
+        # Ensure MLM model is loaded
+        if self._mlm_model is None and not self._mlm_load_failed:
+            self._ensure_mlm_model()
+
+        if self._mlm_model is None:
+            print("Warning: MLM model not available. Cannot generate substitutes.")
+            return [[] for _ in sentences]
+
+        # Load filter model for stopwords/lemmatization if needed
+        filter_nlp = None
+        if filter_stopwords or lemmatize:
+            if filter_model:
+                # Load custom filter model
+                try:
+                    print(f"  Loading filter model '{filter_model}' for substitutes...")
+                    filter_nlp = spacy.load(filter_model, disable=["parser", "ner"])
+                except OSError:
+                    # Model not found - try to download it
+                    print(f"  Model '{filter_model}' not found. Attempting to download...")
+                    try:
+                        self._download_spacy_model(filter_model)
+                        filter_nlp = spacy.load(filter_model, disable=["parser", "ner"])
+                        print(f"  Successfully loaded '{filter_model}' after download.")
+                    except OSError as e:
+                        raise OSError(
+                            f"Filter model '{filter_model}' could not be loaded or downloaded. "
+                            f"Please install it manually with: python -m spacy download {filter_model}\n"
+                            f"Error: {e}"
+                        )
+            else:
+                # Use embedder's default filter model
+                self._ensure_filter_nlp()
+                filter_nlp = self._filter_nlp
+
+        results = []
+        total_batches = (len(sentences) + batch_size - 1) // batch_size
+
+        # Set up progress bar
+        if tqdm_class is None:
+            from tqdm import tqdm
+            tqdm_class = tqdm
+
+        # Detect tokenizer style once
+        vocab = self.tokenizer.get_vocab() if hasattr(self.tokenizer, 'get_vocab') else self.tokenizer.vocab
+        vocab_tokens = list(vocab.keys())[:5000]
+        is_roberta_style = any(t.startswith("Ġ") for t in vocab_tokens)
+        is_sentencepiece_style = any(t.startswith("▁") for t in vocab_tokens)
+        is_bert_style = any(t.startswith("##") for t in vocab_tokens)
+
+        iterator = range(0, len(sentences), batch_size)
+        if total_batches > 1:
+            iterator = tqdm_class(iterator, total=total_batches, desc="Generating substitutes")
+
+        for batch_start in iterator:
+            batch_sentences = sentences[batch_start:batch_start + batch_size]
+            batch_spans = target_spans[batch_start:batch_start + batch_size]
+
+            # Process each sentence in the batch
+            batch_results = []
+            for sent, (start_char, end_char) in zip(batch_sentences, batch_spans):
+                substitutes = self._generate_substitutes_for_sentence(
+                    sent, start_char, end_char, k,
+                    filter_stopwords, lemmatize,
+                    is_roberta_style, is_sentencepiece_style, is_bert_style,
+                    filter_nlp=filter_nlp
+                )
+                batch_results.append(substitutes)
+
+            results.extend(batch_results)
+
+        return results
+
+    def _generate_substitutes_for_sentence(
+        self,
+        sentence: str,
+        start_char: int,
+        end_char: int,
+        k: int,
+        filter_stopwords: bool,
+        lemmatize: bool,
+        is_roberta_style: bool,
+        is_sentencepiece_style: bool,
+        is_bert_style: bool,
+        filter_nlp=None
+    ) -> List[str]:
+        """
+        Generate substitutes for a single sentence.
+
+        For multi-token words, masks ALL tokens but only predicts from the FIRST position.
+        """
+        # Tokenize with offset mapping
+        encodings = self.tokenizer(
+            sentence,
+            return_tensors='pt',
+            padding=False,
+            truncation=True,
+            max_length=512,
+            return_offsets_mapping=True
+        )
+
+        offset_mapping = encodings['offset_mapping'][0].tolist()
+        input_ids = encodings['input_ids'].to(self.device)
+
+        # Find target token indices
+        target_indices = self._get_subword_indices_for_span(offset_mapping, start_char, end_char)
+        if not target_indices:
+            return []
+
+        # Create masked input - mask ALL target tokens
+        masked_input_ids = input_ids.clone()
+        mask_token_id = self.tokenizer.mask_token_id
+
+        if mask_token_id is None:
+            # Fallback for tokenizers without [MASK] (shouldn't happen for MLM models)
+            return []
+
+        for idx in target_indices:
+            masked_input_ids[0, idx] = mask_token_id
+
+        # Get predictions from MLM model
+        with torch.no_grad():
+            if self.mixed_precision_dtype and self.device.type == 'cuda':
+                with torch.autocast('cuda', dtype=self.mixed_precision_dtype):
+                    outputs = self._mlm_model(masked_input_ids)
+            else:
+                outputs = self._mlm_model(masked_input_ids)
+
+        # Get logits for the FIRST masked position only
+        first_mask_idx = target_indices[0]
+        logits = outputs.logits[0, first_mask_idx, :]
+        probs = torch.softmax(logits, dim=-1)
+
+        # Get top candidates (request more to filter down to k complete words)
+        top_k_candidates = torch.topk(probs, k * 20)
+        top_ids = top_k_candidates.indices
+
+        substitutes = []
+        seen_lemmas = set()
+
+        for token_id in top_ids:
+            if len(substitutes) >= k:
+                break
+
+            token_id_scalar = token_id.item()
+            token_str = self.tokenizer.decode([token_id_scalar]).strip()
+            raw_token = self.tokenizer.convert_ids_to_tokens([token_id_scalar])[0]
+
+            # Skip empty or very short tokens
+            if not token_str or len(token_str) < 2:
+                continue
+
+            # Skip special tokens
+            if token_str.startswith("[") or token_str.startswith("<"):
+                continue
+            if raw_token in self.tokenizer.all_special_tokens:
+                continue
+
+            # Skip continuation tokens (BERT style ##prefix)
+            if raw_token.startswith("##"):
+                continue
+
+            # Determine if this is a valid word-start token
+            is_word_start = False
+
+            if is_roberta_style and raw_token.startswith("Ġ"):
+                is_word_start = True
+            elif is_sentencepiece_style and raw_token.startswith("▁"):
+                is_word_start = True
+            elif is_bert_style and not is_roberta_style and not is_sentencepiece_style:
+                # Pure BERT-style: if it doesn't start with ##, it's a word-start
+                is_word_start = True
+            elif not is_bert_style and not is_roberta_style and not is_sentencepiece_style:
+                # Unknown tokenizer: use re-encoding heuristic
+                test_encoded = self.tokenizer.encode(" " + token_str, add_special_tokens=False)
+                is_word_start = (len(test_encoded) == 1)
+
+            if not is_word_start:
+                continue
+
+            token_lower = token_str.lower()
+
+            # Filter stopwords
+            if filter_stopwords and filter_nlp:
+                if token_lower in filter_nlp.Defaults.stop_words:
+                    continue
+
+            # Lemmatize
+            final_token = token_lower
+            if lemmatize and filter_nlp:
+                try:
+                    doc = filter_nlp(token_lower)
+                    if doc and len(doc) > 0:
+                        lemma = doc[0].lemma_
+                        # Skip non-content POS tags
+                        if doc[0].pos_ in ('X', 'PUNCT', 'SYM', 'SPACE'):
+                            continue
+                        final_token = lemma
+                except Exception:
+                    pass
+
+            # Skip duplicates (after lemmatization)
+            if final_token in seen_lemmas:
+                continue
+            seen_lemmas.add(final_token)
+
+            substitutes.append(final_token)
+
+        return substitutes

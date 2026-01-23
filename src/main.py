@@ -15,7 +15,7 @@ from typing import List, Dict, Tuple, Optional
 from collections import defaultdict, Counter
 
 from semantic_change.corpus import CorpusManager
-from semantic_change.wsi import WordSenseInductor
+from semantic_change.wsi import WordSenseInductor, SubstituteWSI
 from semantic_change.visualization import Visualizer
 from semantic_change.vector_store import VectorStore
 
@@ -48,6 +48,8 @@ class AnalysisConfig:
     context_window: int = 0
     output_dir: str = "output"
     exact_match: bool = False  # If True, search by exact token form instead of lemma
+    substitute_filter_model: Optional[str] = None  # spaCy model for substitute WSI filtering/lemmatization
+    substitute_merge_threshold: float = 0.0  # Jaccard threshold for merging substitute communities (0=disabled)
 
 
 @dataclass
@@ -533,6 +535,78 @@ def run_word_sense_induction(
     return wsi.fit_predict(embeddings)
 
 
+def run_substitute_wsi_analysis(
+    embedder,  # BertEmbedder
+    sentences: List[str],
+    target_spans: List[Tuple[int, int]],
+    min_cluster_size: int = 2,
+    resolution: float = 1.0,
+    k_substitutes: int = 5,
+    tqdm_class=None,
+    filter_model: str = None,
+    merge_threshold: float = 0.0
+) -> Tuple[np.ndarray, 'SubstituteWSI']:
+    """
+    Run substitution-based WSI analysis.
+
+    This implements the approach from Eyal et al., 2022 where word senses
+    are discovered through MLM substitutes and graph community detection,
+    rather than clustering dense embeddings.
+
+    Args:
+        embedder: BertEmbedder instance (with MLM head)
+        sentences: List of sentence texts
+        target_spans: List of (start_char, end_char) tuples for target word
+        min_cluster_size: Minimum nodes to form a sense community
+        resolution: Louvain resolution parameter (higher = more clusters)
+        k_substitutes: Number of top substitutes per instance
+        tqdm_class: Optional tqdm class for progress display
+        filter_model: spaCy model name for stopword filtering and lemmatization.
+                     Examples: 'en_core_web_sm', 'en_core_web_lg', 'de_core_news_sm'.
+                     If None, uses the embedder's default filter model.
+        merge_threshold: Jaccard similarity threshold for merging similar communities.
+                        0.0 = no merging. Typical values: 0.2-0.4
+
+    Returns:
+        Tuple of (sense_labels, substitute_wsi_model)
+    """
+    print("Generating MLM substitutes...")
+    if filter_model:
+        print(f"  Using filter model: {filter_model}")
+
+    # Generate substitutes for all sentences
+    substitutes = embedder.generate_substitutes(
+        sentences=sentences,
+        target_spans=target_spans,
+        k=k_substitutes,
+        filter_stopwords=True,
+        lemmatize=True,
+        tqdm_class=tqdm_class,
+        filter_model=filter_model
+    )
+
+    # Count non-empty results
+    non_empty = sum(1 for s in substitutes if s)
+    print(f"Generated substitutes for {non_empty}/{len(sentences)} instances")
+
+    # Run substitute-based WSI
+    print("Running Louvain community detection...")
+    wsi = SubstituteWSI(
+        min_community_size=min_cluster_size,
+        resolution=resolution,
+        merge_threshold=merge_threshold
+    )
+    labels = wsi.fit_predict(substitutes)
+
+    # Print sense representatives
+    num_senses = wsi.get_num_senses()
+    print(f"\nDiscovered {num_senses} senses:")
+    for i, reps in enumerate(wsi.get_sense_representatives(top_n=5)):
+        print(f"  Sense {i}: {', '.join(reps)}")
+
+    return labels, wsi
+
+
 # =============================================================================
 # Visualization Functions
 # =============================================================================
@@ -982,6 +1056,8 @@ def run_single_analysis(
     viz_max_instances: int = 100,
     context_window: int = 0,
     exact_match: bool = False,
+    substitute_filter_model: Optional[str] = None,
+    substitute_merge_threshold: float = 0.0,
     # Legacy parameters (deprecated)
     use_umap: Optional[bool] = None,
     umap_n_components: Optional[int] = None,
@@ -1030,7 +1106,9 @@ def run_single_analysis(
         viz_reduction=viz_reduction,
         viz_max_instances=viz_max_instances,
         context_window=context_window,
-        exact_match=exact_match
+        exact_match=exact_match,
+        substitute_filter_model=substitute_filter_model,
+        substitute_merge_threshold=substitute_merge_threshold
     )
 
     # Validate
@@ -1111,26 +1189,59 @@ def run_single_analysis(
     combined = combine_embedding_data(data_t1, data_t2)
 
     # Step 4 & 5: WSI clustering (if enabled)
+    substitute_wsi = None  # Will hold SubstituteWSI model if using substitute algorithm
+
     if config.wsi_enabled:
-        # Pre-clustering dimensionality reduction
-        if config.clustering_reduction:
-            print(f"--- Pre-clustering Reduction: {config.clustering_reduction.upper()} "
-                  f"(n={config.clustering_n_components}) ---")
+        if config.wsi_algorithm == 'substitute':
+            # Use substitution-based WSI (Eyal et al., 2022)
+            print(f"--- Running Substitute-based WSI ---")
 
-        clustering_embeddings = apply_dimensionality_reduction(
-            combined.embeddings,
-            config.clustering_reduction,
-            config.clustering_n_components
-        )
+            # Need to load embedder for MLM predictions
+            from semantic_change.embedding import BertEmbedder
+            print(f"Loading embedder for MLM substitutes: {config.model_name}")
+            embedder = BertEmbedder(model_name=config.model_name)
 
-        # Run clustering
-        print(f"--- Running WSI ({config.wsi_algorithm.upper()}) ---")
-        sense_labels = run_word_sense_induction(
-            clustering_embeddings,
-            config.wsi_algorithm,
-            config.min_cluster_size,
-            config.n_clusters
-        )
+            # Prepare sentences and spans for substitute generation
+            all_sentences = list(combined.sentences)
+            all_spans = list(combined.highlight_spans) if combined.highlight_spans else []
+
+            # If spans are missing, we can't run substitute WSI
+            if not all_spans or len(all_spans) != len(all_sentences):
+                print("Warning: Target spans not available. Falling back to HDBSCAN.")
+                config.wsi_algorithm = 'hdbscan'
+            else:
+                sense_labels, substitute_wsi = run_substitute_wsi_analysis(
+                    embedder=embedder,
+                    sentences=all_sentences,
+                    target_spans=all_spans,
+                    min_cluster_size=config.min_cluster_size,
+                    resolution=1.0,
+                    k_substitutes=5,
+                    filter_model=config.substitute_filter_model,
+                    merge_threshold=config.substitute_merge_threshold
+                )
+
+        if config.wsi_algorithm != 'substitute':
+            # Use embedding-based WSI (original approach)
+            # Pre-clustering dimensionality reduction
+            if config.clustering_reduction:
+                print(f"--- Pre-clustering Reduction: {config.clustering_reduction.upper()} "
+                      f"(n={config.clustering_n_components}) ---")
+
+            clustering_embeddings = apply_dimensionality_reduction(
+                combined.embeddings,
+                config.clustering_reduction,
+                config.clustering_n_components
+            )
+
+            # Run clustering
+            print(f"--- Running WSI ({config.wsi_algorithm.upper()}) ---")
+            sense_labels = run_word_sense_induction(
+                clustering_embeddings,
+                config.wsi_algorithm,
+                config.min_cluster_size,
+                config.n_clusters
+            )
     else:
         print("--- WSI disabled: treating all usages as single sense ---")
         sense_labels = np.zeros(len(combined.embeddings), dtype=int)
@@ -1189,6 +1300,26 @@ def run_single_analysis(
         period_t1_label=config.period_t1_label,
         period_t2_label=config.period_t2_label
     )
+
+    # Step 9: Create substitute graph visualization (if using substitute WSI)
+    if substitute_wsi is not None and substitute_wsi.graph_ is not None:
+        print("Plotting Substitute Co-occurrence Graph...")
+        substitute_graph_path = os.path.join(
+            config.output_dir,
+            get_output_filename(
+                config.project_id,
+                config.model_name,
+                config.target_word,
+                "substitute_graph.html"
+            )
+        )
+        viz.plot_substitute_graph(
+            graph=substitute_wsi.graph_,
+            communities=substitute_wsi.communities_,
+            title=f"'{config.target_word}' Substitute Co-occurrence Graph",
+            save_path=substitute_graph_path,
+            max_nodes=60
+        )
 
     print("Done!")
 
