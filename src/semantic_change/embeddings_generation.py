@@ -478,7 +478,8 @@ def bulk_import_from_staging(staging_dir: str, vector_store: VectorStore,
         all_metadatas = []
         all_ids = []
 
-        for npz_path in tqdm_class(npz_files, desc=f"Loading {collection_name}"):
+        # Use regular tqdm to avoid Streamlit threading warnings
+        for npz_path in tqdm(npz_files, desc=f"Loading {collection_name}"):
             data = np.load(npz_path, allow_pickle=True)
             all_embeddings.extend(data['embeddings'].tolist())
             all_metadatas.extend([json.loads(m) for m in data['metadatas']])
@@ -488,11 +489,12 @@ def bulk_import_from_staging(staging_dir: str, vector_store: VectorStore,
         print(f"  Loaded {total_loaded} embeddings, inserting into ChromaDB...")
 
         # Insert in batches with progress bar
+        # Use regular tqdm here to avoid Streamlit threading warnings
         if all_embeddings:
             batch_size = 5000  # ChromaDB limit is 5461
             num_batches = (total_loaded + batch_size - 1) // batch_size
 
-            with tqdm_class(total=total_loaded, desc=f"Importing {collection_name}") as pbar:
+            with tqdm(total=total_loaded, desc=f"Importing {collection_name}") as pbar:
                 for start in range(0, total_loaded, batch_size):
                     end = min(start + batch_size, total_loaded)
                     vector_store.add_embeddings(
