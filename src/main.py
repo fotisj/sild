@@ -43,6 +43,10 @@ class AnalysisConfig:
     pos_filter: Optional[str] = None
     clustering_reduction: Optional[str] = None
     clustering_n_components: int = 50
+    umap_n_neighbors: int = 15  # UMAP: controls local vs global structure
+    umap_min_dist: float = 0.1  # UMAP: minimum distance between points
+    umap_metric: str = "euclidean"  # UMAP: distance metric
+    tsne_perplexity: int = 30  # t-SNE: related to number of nearest neighbors
     viz_reduction: str = "pca"
     viz_max_instances: int = 100
     context_window: int = 0
@@ -452,7 +456,11 @@ def apply_dimensionality_reduction(
     embeddings: np.ndarray,
     method: Optional[str],
     n_components: int,
-    random_state: int = 42
+    random_state: int = 42,
+    umap_n_neighbors: int = 15,
+    umap_min_dist: float = 0.1,
+    umap_metric: str = "euclidean",
+    tsne_perplexity: int = 30
 ) -> np.ndarray:
     """
     Apply dimensionality reduction to embeddings.
@@ -462,6 +470,10 @@ def apply_dimensionality_reduction(
         method: Reduction method ('pca', 'umap', 'tsne') or None
         n_components: Target number of dimensions
         random_state: Random seed for reproducibility
+        umap_n_neighbors: UMAP n_neighbors parameter (local vs global structure)
+        umap_min_dist: UMAP min_dist parameter (point packing tightness)
+        umap_metric: UMAP distance metric
+        tsne_perplexity: t-SNE perplexity (related to number of nearest neighbors)
 
     Returns:
         Reduced embeddings, or original if no reduction applied
@@ -484,7 +496,13 @@ def apply_dimensionality_reduction(
     elif method_lower == 'umap':
         try:
             import umap
-            reducer = umap.UMAP(n_components=n_components, random_state=random_state)
+            reducer = umap.UMAP(
+                n_components=n_components,
+                n_neighbors=umap_n_neighbors,
+                min_dist=umap_min_dist,
+                metric=umap_metric,
+                random_state=random_state
+            )
             return reducer.fit_transform(embeddings)
         except ImportError:
             print("Warning: umap-learn not installed. Skipping reduction.")
@@ -492,7 +510,8 @@ def apply_dimensionality_reduction(
 
     elif method_lower == 'tsne':
         from sklearn.manifold import TSNE
-        perplexity = min(30, len(embeddings) - 1)
+        # Perplexity must be less than number of samples
+        perplexity = min(tsne_perplexity, len(embeddings) - 1)
         reducer = TSNE(
             n_components=min(n_components, 3),
             perplexity=perplexity,
@@ -1051,6 +1070,10 @@ def run_single_analysis(
     pos_filter: Optional[str] = None,
     clustering_reduction: Optional[str] = None,
     clustering_n_components: int = 50,
+    umap_n_neighbors: int = 15,
+    umap_min_dist: float = 0.1,
+    umap_metric: str = "euclidean",
+    tsne_perplexity: int = 30,
     viz_reduction: str = "pca",
     n_samples: int = 50,
     viz_max_instances: int = 100,
@@ -1103,6 +1126,10 @@ def run_single_analysis(
         pos_filter=pos_filter,
         clustering_reduction=clustering_reduction,
         clustering_n_components=clustering_n_components,
+        umap_n_neighbors=umap_n_neighbors,
+        umap_min_dist=umap_min_dist,
+        umap_metric=umap_metric,
+        tsne_perplexity=tsne_perplexity,
         viz_reduction=viz_reduction,
         viz_max_instances=viz_max_instances,
         context_window=context_window,
@@ -1231,7 +1258,11 @@ def run_single_analysis(
             clustering_embeddings = apply_dimensionality_reduction(
                 combined.embeddings,
                 config.clustering_reduction,
-                config.clustering_n_components
+                config.clustering_n_components,
+                umap_n_neighbors=config.umap_n_neighbors,
+                umap_min_dist=config.umap_min_dist,
+                umap_metric=config.umap_metric,
+                tsne_perplexity=config.tsne_perplexity
             )
 
             # Run clustering

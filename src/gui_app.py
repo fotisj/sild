@@ -80,6 +80,10 @@ def get_default_config() -> dict:
         "pos_filter": "None",
         "clustering_reduction": "None",
         "clustering_n_components": 50,
+        "umap_n_neighbors": 15,
+        "umap_min_dist": 0.1,
+        "umap_metric": "euclidean",
+        "tsne_perplexity": 30,
         "viz_reduction": "pca",
         "use_umap": True,
         "umap_n_components": 50,
@@ -1165,8 +1169,69 @@ def render_wsi_parameters(config: dict) -> dict:
                 max_value=200,
                 value=config.get("clustering_n_components", 50),
             )
+
+            # UMAP-specific parameters
+            if params["clustering_reduction"] == "umap":
+                st.markdown(
+                    "_[UMAP parameters documentation](https://umap-learn.readthedocs.io/en/latest/parameters.html)_"
+                )
+                params["umap_n_neighbors"] = st.slider(
+                    "UMAP n_neighbors",
+                    min_value=2,
+                    max_value=200,
+                    value=config.get("umap_n_neighbors", 15),
+                    help="Controls local vs global structure. Low values (2-5) focus on fine detail, "
+                         "high values (100+) emphasize global patterns. Default: 15."
+                )
+                params["umap_min_dist"] = st.slider(
+                    "UMAP min_dist",
+                    min_value=0.0,
+                    max_value=0.99,
+                    value=config.get("umap_min_dist", 0.1),
+                    step=0.05,
+                    help="How tightly points can be packed. Low values (0.0) create clumpy embeddings, "
+                         "high values (0.8+) spread points apart. Default: 0.1."
+                )
+                umap_metric_options = ["euclidean", "manhattan", "cosine", "correlation"]
+                current_metric = config.get("umap_metric", "euclidean")
+                if current_metric not in umap_metric_options:
+                    current_metric = "euclidean"
+                params["umap_metric"] = st.selectbox(
+                    "UMAP metric",
+                    options=umap_metric_options,
+                    index=umap_metric_options.index(current_metric),
+                    help="Distance metric for computing nearness. 'cosine' is often good for embeddings."
+                )
+            # t-SNE specific parameters
+            elif params["clustering_reduction"] == "tsne":
+                st.markdown(
+                    "_[How to use t-SNE effectively](https://distill.pub/2016/misread-tsne/)_"
+                )
+                params["tsne_perplexity"] = st.slider(
+                    "t-SNE perplexity",
+                    min_value=2,
+                    max_value=100,
+                    value=config.get("tsne_perplexity", 30),
+                    help="Related to the number of nearest neighbors. Larger datasets usually require "
+                         "larger perplexity (5-50 typical). Different values can result in significantly "
+                         "different results. Must be less than the number of samples."
+                )
+            else:
+                params["tsne_perplexity"] = config.get("tsne_perplexity", 30)
+
+            # Set defaults for non-selected methods
+            if params["clustering_reduction"] != "umap":
+                params["umap_n_neighbors"] = config.get("umap_n_neighbors", 15)
+                params["umap_min_dist"] = config.get("umap_min_dist", 0.1)
+                params["umap_metric"] = config.get("umap_metric", "euclidean")
+            if params["clustering_reduction"] != "tsne":
+                params["tsne_perplexity"] = config.get("tsne_perplexity", 30)
         else:
             params["clustering_n_components"] = config.get("clustering_n_components", 50)
+            params["umap_n_neighbors"] = config.get("umap_n_neighbors", 15)
+            params["umap_min_dist"] = config.get("umap_min_dist", 0.1)
+            params["umap_metric"] = config.get("umap_metric", "euclidean")
+            params["tsne_perplexity"] = config.get("tsne_perplexity", 30)
 
         # Clustering algorithm
         wsi_options = ["hdbscan", "kmeans", "spectral", "agglomerative", "substitute"]
@@ -1264,6 +1329,10 @@ def render_wsi_parameters(config: dict) -> dict:
         # Set default values when WSI is disabled
         params["clustering_reduction"] = config.get("clustering_reduction", "None")
         params["clustering_n_components"] = config.get("clustering_n_components", 50)
+        params["umap_n_neighbors"] = config.get("umap_n_neighbors", 15)
+        params["umap_min_dist"] = config.get("umap_min_dist", 0.1)
+        params["umap_metric"] = config.get("umap_metric", "euclidean")
+        params["tsne_perplexity"] = config.get("tsne_perplexity", 30)
         params["wsi_algorithm"] = config["wsi_algorithm"]
         params["n_clusters"] = config["n_clusters"]
         params["min_cluster_size"] = config["min_cluster_size"]
@@ -1312,6 +1381,10 @@ def update_config_from_params(config: dict, params: dict) -> None:
     config["n_clusters"] = params.get("n_clusters", config["n_clusters"])
     config["clustering_reduction"] = params.get("clustering_reduction", config["clustering_reduction"])
     config["clustering_n_components"] = params.get("clustering_n_components", config["clustering_n_components"])
+    config["umap_n_neighbors"] = params.get("umap_n_neighbors", config.get("umap_n_neighbors", 15))
+    config["umap_min_dist"] = params.get("umap_min_dist", config.get("umap_min_dist", 0.1))
+    config["umap_metric"] = params.get("umap_metric", config.get("umap_metric", "euclidean"))
+    config["tsne_perplexity"] = params.get("tsne_perplexity", config.get("tsne_perplexity", 30))
     config["viz_reduction"] = params.get("viz_reduction", config["viz_reduction"])
     config["k_neighbors"] = params.get("k_neighbors", config["k_neighbors"])
     config["substitute_filter_model"] = params.get("substitute_filter_model", config.get("substitute_filter_model"))
@@ -1351,6 +1424,10 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                     pos_filter=pos_filter,
                     clustering_reduction=clust_red,
                     clustering_n_components=params["clustering_n_components"],
+                    umap_n_neighbors=params.get("umap_n_neighbors", 15),
+                    umap_min_dist=params.get("umap_min_dist", 0.1),
+                    umap_metric=params.get("umap_metric", "euclidean"),
+                    tsne_perplexity=params.get("tsne_perplexity", 30),
                     viz_reduction=params["viz_reduction"],
                     n_samples=params["n_samples"],
                     viz_max_instances=params["viz_max_instances"],
