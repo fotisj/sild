@@ -194,9 +194,10 @@ Implement the graph-based Word Sense Induction approach based on "Large Scale Su
     - Useful when project is in a synced folder (Dropbox, OneDrive) to avoid I/O contention
     - Default: `data/chroma_db` (current behavior)
 
-- [ ] **Reduce stqdm Threading Warnings**: The `ThreadPoolExecutor` in `process_corpus()` causes "missing ScriptRunContext" warnings when using `stqdm`. Options:
+- [x] **Reduce stqdm Threading Warnings**: The `ThreadPoolExecutor` in `process_corpus()` causes "missing ScriptRunContext" warnings when using `stqdm`. Options:
     - Use regular `tqdm` for the thread pool progress (only affects internal logging)
     - Or remove async writes when disk I/O is the bottleneck anyway
+    - **Implemented**: ChromaDB bulk import now uses regular `tqdm` instead of `stqdm` to avoid threading context issues
 
 - [ ] **Export**: Allow exporting the analysis results (cluster assignments, neighbor lists) as CSV/JSON.
 - [ ] **Cleaning up the GUI**:
