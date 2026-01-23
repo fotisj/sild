@@ -442,7 +442,7 @@ class BertEmbedder(Embedder):
         # We process in batches to leverage GPU
         total_batches = (len(items) + batch_size - 1) // batch_size
         # Print to terminal (bypassing Streamlit capture)
-        print(f"    [batch_extract] {len(items)} items in {total_batches} batches (size={batch_size})", file=sys.__stdout__)
+        print(f"\n    [batch_extract] {len(items)} items in {total_batches} batches (size={batch_size})", file=sys.__stdout__)
         sys.__stdout__.flush()
 
         batch_start_time = time_module.time()
@@ -566,7 +566,7 @@ class BertEmbedder(Embedder):
                 del batch_word_vecs
             torch.cuda.empty_cache()
 
-        print(f"    [batch_extract] Done. {len(results)} embeddings extracted.", file=sys.__stdout__)
+        print(f"\n    [batch_extract] Done. {len(results)} embeddings extracted.", file=sys.__stdout__)
         sys.__stdout__.flush()
         return results
 

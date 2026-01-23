@@ -1090,6 +1090,16 @@ def render_search_parameters(config: dict) -> dict:
         min_value=10,
         max_value=2000,
         value=config["n_samples"],
+        help="Maximum embeddings to load from ChromaDB per time period."
+    )
+
+    params["viz_max_instances"] = st.number_input(
+        "Max Points per Cluster (Viz)",
+        min_value=10,
+        max_value=2000,
+        value=config.get("viz_max_instances", 100),
+        help="Maximum points to display per sense cluster in visualization. "
+             "Increase this to show more data points on the plot."
     )
 
     return params
@@ -1224,6 +1234,7 @@ def update_config_from_params(config: dict, params: dict) -> None:
     config["target_word"] = params.get("target_word", config["target_word"])
     config["pos_filter"] = params.get("pos_filter", config["pos_filter"])
     config["n_samples"] = params.get("n_samples", config["n_samples"])
+    config["viz_max_instances"] = params.get("viz_max_instances", config.get("viz_max_instances", 100))
     config["model_name"] = params.get("model_name", config["model_name"])
     config["wsi_enabled"] = params.get("wsi_enabled", config.get("wsi_enabled", True))
     config["wsi_algorithm"] = params.get("wsi_algorithm", config["wsi_algorithm"])
@@ -1270,7 +1281,7 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                     clustering_n_components=params["clustering_n_components"],
                     viz_reduction=params["viz_reduction"],
                     n_samples=params["n_samples"],
-                    viz_max_instances=config["viz_max_instances"],
+                    viz_max_instances=params["viz_max_instances"],
                     exact_match=params.get("exact_match", False),
                 )
 

@@ -381,6 +381,10 @@ def fetch_embeddings_from_store(
     sentences, filenames = fetch_sentences_from_db(db_path, sentence_ids)
     spans = extract_spans_from_metadata(metadatas)
 
+    # Debug: check for length mismatches
+    if len(sentences) != len(embeddings):
+        print(f"  WARNING: sentences ({len(sentences)}) != embeddings ({len(embeddings)})")
+
     return EmbeddingData(
         embeddings=embeddings,
         sentences=sentences,
@@ -408,6 +412,8 @@ def combine_embedding_data(
     Returns:
         CombinedEmbeddingData with all embeddings merged
     """
+    print(f"  Combining: T1={len(data_t1.embeddings)} emb/{len(data_t1.sentences)} sent, "
+          f"T2={len(data_t2.embeddings)} emb/{len(data_t2.sentences)} sent")
     embeddings = np.vstack([data_t1.embeddings, data_t2.embeddings])
 
     time_labels = np.array(
@@ -1131,6 +1137,7 @@ def run_single_analysis(
 
     # Step 6: Prepare visualization data
     print(f"--- Visualizing (reduction: {config.viz_reduction.upper()}) ---")
+    print(f"  Combined embeddings: {len(combined.embeddings)}, sense_labels: {len(sense_labels)}, unique senses: {np.unique(sense_labels)}")
 
     sub_embs, sub_sense_labs, sub_sents, sub_fnames, sub_spans, sub_indices = \
         subsample_for_visualization(
@@ -1142,6 +1149,7 @@ def run_single_analysis(
             combined.highlight_spans
         )
 
+    print(f"  After subsampling: {len(sub_embs)} points (max_per_class={config.viz_max_instances})")
     sub_time_labs = combined.time_labels[sub_indices]
 
     # Compute 2D projection

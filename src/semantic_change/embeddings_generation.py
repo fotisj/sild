@@ -289,17 +289,17 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
                 batch_items = None
 
     if batch_items is None:
-        print(f"  [{time.strftime('%H:%M:%S')}] Collecting sentences for {len(target_words)} words...")
+        print(f"\n  [{time.strftime('%H:%M:%S')}] Collecting sentences for {len(target_words)} words...")
         import sys
         sys.stdout.flush()
         batch_items = collect_sentences_for_words(db_path, target_words, max_samples=max_samples,
                                                    pos_filter=pos_filter, tqdm_class=tqdm_class)
-        print(f"  [{time.strftime('%H:%M:%S')}] Collected {len(batch_items)} sentence batches. Saving plan...")
+        print(f"\n  [{time.strftime('%H:%M:%S')}] Collected {len(batch_items)} sentence batches. Saving plan...")
         sys.stdout.flush()
         # Save plan for potential resume
         with open(plan_path, 'w') as f:
             json.dump(batch_items, f)
-        print(f"  [{time.strftime('%H:%M:%S')}] Plan saved.")
+        print(f"\n  [{time.strftime('%H:%M:%S')}] Plan saved.")
         sys.stdout.flush()
 
     total_sents = len(batch_items)
@@ -311,9 +311,9 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
     chunk_size = 500
     if embed_batch_size is None:
         embed_batch_size = detect_optimal_batch_size()
-        print(f"  [{time.strftime('%H:%M:%S')}] Auto-detected embedding batch size: {embed_batch_size}")
+        print(f"\n  [{time.strftime('%H:%M:%S')}] Auto-detected embedding batch size: {embed_batch_size}")
     else:
-        print(f"  [{time.strftime('%H:%M:%S')}] Using specified embedding batch size: {embed_batch_size}")
+        print(f"\n  [{time.strftime('%H:%M:%S')}] Using specified embedding batch size: {embed_batch_size}")
 
     desc = f"Processing {os.path.basename(db_path)} -> NPZ"
     total_written = 0
@@ -342,19 +342,19 @@ def process_corpus_staged(db_path: str, collection_name: str, target_words: List
                 start_item_idx = 0
 
     total_chunks = (total_sents - start_item_idx + chunk_size - 1) // chunk_size
-    print(f"  [TERMINAL] Starting embedding extraction: {total_sents} sentences, {total_chunks} chunks", file=sys.__stdout__)
+    print(f"\n  [TERMINAL] Starting embedding extraction: {total_sents} sentences, {total_chunks} chunks", file=sys.__stdout__)
     sys.__stdout__.flush()
 
     with tqdm_class(total=total_sents, initial=start_item_idx, desc=desc) as pbar:
         for i in range(start_item_idx, total_sents, chunk_size):
-            print(f"  [TERMINAL] Chunk {chunk_idx+1}/{total_chunks} (items {i}-{min(i+chunk_size, total_sents)})...", file=sys.__stdout__)
+            print(f"\n  [TERMINAL] Chunk {chunk_idx+1}/{total_chunks} (items {i}-{min(i+chunk_size, total_sents)})...", file=sys.__stdout__)
             sys.__stdout__.flush()
             chunk = batch_items[i : i + chunk_size]
 
             t0 = time.time()
             chunk_results = embedder.batch_extract(chunk, batch_size=embed_batch_size)
             dt = time.time() - t0
-            print(f"  [TERMINAL] Chunk done in {dt:.2f}s. Got {len(chunk_results)} embeddings.", file=sys.__stdout__)
+            print(f"\n  [TERMINAL] Chunk done in {dt:.2f}s. Got {len(chunk_results)} embeddings.", file=sys.__stdout__)
             sys.__stdout__.flush()
 
             if chunk_results:
@@ -487,15 +487,22 @@ def bulk_import_from_staging(staging_dir: str, vector_store: VectorStore,
         total_loaded = len(all_embeddings)
         print(f"  Loaded {total_loaded} embeddings, inserting into ChromaDB...")
 
-        # Single bulk insert - ChromaDB will batch internally if needed
+        # Insert in batches with progress bar
         if all_embeddings:
-            vector_store.add_embeddings(
-                collection_name=collection_name,
-                embeddings=[np.array(e) for e in all_embeddings],
-                metadatas=all_metadatas,
-                ids=all_ids,
-                max_batch_size=10000  # Larger batches for bulk import
-            )
+            batch_size = 5000  # ChromaDB limit is 5461
+            num_batches = (total_loaded + batch_size - 1) // batch_size
+
+            with tqdm_class(total=total_loaded, desc=f"Importing {collection_name}") as pbar:
+                for start in range(0, total_loaded, batch_size):
+                    end = min(start + batch_size, total_loaded)
+                    vector_store.add_embeddings(
+                        collection_name=collection_name,
+                        embeddings=[np.array(e) for e in all_embeddings[start:end]],
+                        metadatas=all_metadatas[start:end],
+                        ids=all_ids[start:end],
+                        max_batch_size=batch_size
+                    )
+                    pbar.update(end - start)
 
         results[collection_name] = total_loaded
         print(f"  Successfully imported {total_loaded} embeddings to {collection_name}")
@@ -622,8 +629,8 @@ def run_batch_generation(
         resume: If True, attempt to resume from existing staged files and plan.
     """
     import sys
-    print(f"[{time.strftime('%H:%M:%S')}] run_batch_generation() started")
-    print(f"  project_id={project_id}, model={model_name}, staged={staged}, resume={resume}")
+    print(f"\n[{time.strftime('%H:%M:%S')}] run_batch_generation() started")
+    print(f"\n  project_id={project_id}, model={model_name}, staged={staged}, resume={resume}")
     sys.stdout.flush()
 
     # Handle legacy args
@@ -677,23 +684,23 @@ def run_batch_generation(
         return
 
     # Normal mode: generate embeddings
-    print(f"[{time.strftime('%H:%M:%S')}] Initializing ChromaDB Vector Store with target POS: {pos_filter}...")
+    print(f"\n[{time.strftime('%H:%M:%S')}] Initializing ChromaDB Vector Store with target POS: {pos_filter}...")
     sys.stdout.flush()
     vector_store = VectorStore(persistence_path="data/chroma_db")
-    print(f"[{time.strftime('%H:%M:%S')}] ChromaDB initialized.")
+    print(f"\n[{time.strftime('%H:%M:%S')}] ChromaDB initialized.")
     sys.stdout.flush()
 
     # Read spaCy model from database metadata (for neighbor filtering)
-    print(f"[{time.strftime('%H:%M:%S')}] Reading spaCy model from DB metadata...")
+    print(f"\n[{time.strftime('%H:%M:%S')}] Reading spaCy model from DB metadata...")
     sys.stdout.flush()
     spacy_model = get_spacy_model_from_db(db_path_t1)
     if spacy_model:
-        print(f"[{time.strftime('%H:%M:%S')}] Using spaCy model from corpus metadata: {spacy_model}")
+        print(f"\n[{time.strftime('%H:%M:%S')}] Using spaCy model from corpus metadata: {spacy_model}")
     else:
-        print(f"[{time.strftime('%H:%M:%S')}] No spaCy model found in corpus metadata, using defaults.")
+        print(f"\n[{time.strftime('%H:%M:%S')}] No spaCy model found in corpus metadata, using defaults.")
     sys.stdout.flush()
 
-    print(f"[{time.strftime('%H:%M:%S')}] Loading embedding model '{model_name}'... (this may take a while)")
+    print(f"\n[{time.strftime('%H:%M:%S')}] Loading embedding model '{model_name}'... (this may take a while)")
     sys.stdout.flush()
     embedder = BertEmbedder(
         model_name=model_name,
@@ -702,7 +709,7 @@ def run_batch_generation(
         layers=layers,
         layer_op=layer_op
     )
-    print(f"[{time.strftime('%H:%M:%S')}] Embedding model loaded successfully.")
+    print(f"\n[{time.strftime('%H:%M:%S')}] Embedding model loaded successfully.")
     sys.stdout.flush()
 
     if reset_collections:
@@ -723,7 +730,7 @@ def run_batch_generation(
         vector_store.get_or_create_collection(coll_t1, metadata={"model_name": model_name})
         vector_store.get_or_create_collection(coll_t2, metadata={"model_name": model_name})
 
-    print(f"[{time.strftime('%H:%M:%S')}] Finding target words (min_freq={min_freq}, pos={pos_filter})...")
+    print(f"\n[{time.strftime('%H:%M:%S')}] Finding target words (min_freq={min_freq}, pos={pos_filter})...")
     sys.stdout.flush()
 
     if test_mode:
@@ -732,7 +739,7 @@ def run_batch_generation(
         if len(shared_words) > test_num_words:
             import random
             shared_words = random.sample(shared_words, test_num_words)
-        print(f"[{time.strftime('%H:%M:%S')}] Test mode: Selected {len(shared_words)} shared nouns: {shared_words[:10]}...")
+        print(f"\n[{time.strftime('%H:%M:%S')}] Test mode: Selected {len(shared_words)} shared nouns: {shared_words[:10]}...")
         words_t1 = shared_words
         words_t2 = shared_words
     else:
@@ -740,14 +747,14 @@ def run_batch_generation(
         words_t1 = get_frequent_words(db_path_t1, min_freq=min_freq, pos_filter=pos_filter)
         if additional_words:
             words_t1 = sorted(list(set(words_t1 + additional_words)))
-        print(f"[{time.strftime('%H:%M:%S')}] Found {len(words_t1)} words in T1")
+        print(f"\n[{time.strftime('%H:%M:%S')}] Found {len(words_t1)} words in T1")
         sys.stdout.flush()
 
         # --- Period 2 ---
         words_t2 = get_frequent_words(db_path_t2, min_freq=min_freq, pos_filter=pos_filter)
         if additional_words:
             words_t2 = sorted(list(set(words_t2 + additional_words)))
-        print(f"[{time.strftime('%H:%M:%S')}] Found {len(words_t2)} words in T2")
+        print(f"\n[{time.strftime('%H:%M:%S')}] Found {len(words_t2)} words in T2")
         sys.stdout.flush()
 
     if staged:
