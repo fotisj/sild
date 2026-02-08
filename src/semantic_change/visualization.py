@@ -166,8 +166,9 @@ class Visualizer:
         # Wrap sentences for better hover display, with optional highlighting
         wrapped_sentences = []
         for i, s in enumerate(sentences):
-            if highlight_spans and i < len(highlight_spans) and highlight_spans[i]:
-                start, end = highlight_spans[i]
+            span = highlight_spans[i] if highlight_spans and i < len(highlight_spans) else None
+            if span is not None:
+                start, end = span
                 wrapped = _highlight_word_in_sentence(s, start, end)
             else:
                 wrapped = "<br>".join([s[j:j+80] for j in range(0, len(s), 80)])
@@ -273,8 +274,9 @@ class Visualizer:
             node_labels.append(str(labels[i]))
 
             s = sentences[i]
-            if highlight_spans and i < len(highlight_spans) and highlight_spans[i]:
-                start, end = highlight_spans[i]
+            span = highlight_spans[i] if highlight_spans and i < len(highlight_spans) else None
+            if span is not None:
+                start, end = span
                 wrapped = _highlight_word_in_sentence(s, start, end)
             else:
                 wrapped = "<br>".join([s[idx:idx+80] for idx in range(0, len(s), 80)])
@@ -381,8 +383,9 @@ class Visualizer:
             filenames = ["Unknown"] * len(sentences)
 
         for i, s in enumerate(sentences):
-            if highlight_spans and i < len(highlight_spans) and highlight_spans[i]:
-                start, end = highlight_spans[i]
+            span = highlight_spans[i] if highlight_spans and i < len(highlight_spans) else None
+            if span is not None:
+                start, end = span
                 wrapped = _highlight_word_in_sentence(s, start, end)
             else:
                 wrapped = "<br>".join([s[j:j+80] for j in range(0, len(s), 80)])

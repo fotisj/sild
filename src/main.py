@@ -1086,7 +1086,7 @@ def run_single_analysis(
     umap_n_components: Optional[int] = None,
     db_path_1800: Optional[str] = None,
     db_path_1900: Optional[str] = None,
-) -> None:
+) -> Optional[Dict]:
     """
     Run semantic change analysis for a single word.
 
@@ -1142,7 +1142,7 @@ def run_single_analysis(
     error = validate_config(config)
     if error:
         print(f"Error: {error}. Please run ingestion first.")
-        return
+        return None
 
     # Step 1: Clean output
     print("--- Cleaning up old visualizations ---")
@@ -1158,13 +1158,13 @@ def run_single_analysis(
 
     if not config.project_id:
         print("Error: project_id is required.")
-        return
+        return None
 
     try:
         vector_store = VectorStore(persistence_path="data/chroma_db")
     except Exception as e:
         print(f"Could not initialize Vector Store: {e}")
-        return
+        return None
 
     # Get collection names for this project and model
     safe_model = config.model_name.replace("/", "_").replace("-", "_")
@@ -1172,7 +1172,7 @@ def run_single_analysis(
     if coll_t1 is None and coll_t2 is None:
         print(f"No embedding collections found for project '{config.project_id}' and model '{config.model_name}'.")
         print("Available models for this project:", vector_store.get_available_models(config.project_id))
-        return
+        return None
 
     data_t1 = None
     if coll_t1:
@@ -1196,7 +1196,7 @@ def run_single_analysis(
 
     if (data_t1 is None or data_t1.is_empty()) and (data_t2 is None or data_t2.is_empty()):
         print("No embeddings found in Vector Store. Please run embedding generation first.")
-        return
+        return None
 
     # Handle case where only one period has data
     if data_t1 is None or data_t1.is_empty():
@@ -1353,6 +1353,299 @@ def run_single_analysis(
         )
 
     print("Done!")
+
+    # Return analysis results for drill-down functionality
+    return {
+        'combined_embeddings': combined.embeddings,
+        'combined_sentences': np.array(combined.sentences),
+        'combined_filenames': np.array(combined.filenames),
+        'combined_time_labels': combined.time_labels,
+        'combined_spans': combined.highlight_spans,
+        'sense_labels': sense_labels,
+    }
+
+
+# =============================================================================
+# Micro Analysis Functions (Drill-Down)
+# =============================================================================
+
+def run_micro_analysis(
+    cluster_file: str,
+    wsi_algorithm: str = "hdbscan",
+    min_cluster_size: int = 3,
+    n_clusters: int = 3,
+    clustering_reduction: Optional[str] = None,
+    clustering_n_components: int = 50,
+    umap_n_neighbors: int = 15,
+    umap_min_dist: float = 0.1,
+    umap_metric: str = "euclidean",
+    tsne_perplexity: int = 30,
+    viz_reduction: str = "pca",
+    viz_max_instances: int = 100,
+    output_dir: str = "output",
+    substitute_filter_model: Optional[str] = None,
+    substitute_merge_threshold: float = 0.0,
+) -> Optional[Dict]:
+    """
+    Run micro analysis on a saved cluster (drill-down).
+
+    Args:
+        cluster_file: Path to the .npz file containing cluster data
+        wsi_algorithm: Clustering algorithm name
+        min_cluster_size: Minimum cluster size (for HDBSCAN)
+        n_clusters: Number of clusters (for KMeans etc.)
+        clustering_reduction: Pre-clustering dimensionality reduction method
+        clustering_n_components: Target dimensions for pre-clustering reduction
+        umap_n_neighbors: UMAP n_neighbors parameter
+        umap_min_dist: UMAP min_dist parameter
+        umap_metric: UMAP distance metric
+        tsne_perplexity: t-SNE perplexity parameter
+        viz_reduction: Visualization reduction method
+        viz_max_instances: Max instances per cluster for visualization
+        output_dir: Output directory for visualizations
+        substitute_filter_model: spaCy model for substitute WSI
+        substitute_merge_threshold: Merge threshold for substitute WSI
+
+    Returns:
+        Dict with analysis results, or None on failure
+    """
+    import json
+
+    # 1. Load cluster data
+    print(f"Loading cluster data from {cluster_file}...")
+    try:
+        data = np.load(cluster_file, allow_pickle=True)
+        embeddings = data['embeddings']
+        sentences = data['sentences']
+        filenames = data['filenames']
+        time_labels = data['time_labels']
+        spans = data['spans']
+        metadata = json.loads(str(data['metadata']))
+    except Exception as e:
+        print(f"Error loading cluster file: {e}")
+        return None
+
+    print(f"  Loaded {len(embeddings)} instances from cluster {metadata.get('original_cluster_id', '?')}")
+    print(f"  Original word: '{metadata.get('target_word', '?')}', model: {metadata.get('model_name', '?')}")
+
+    # Check minimum data requirements
+    if len(embeddings) < 3:
+        print("Error: Not enough data points for micro analysis (minimum 3 required)")
+        return None
+
+    # 2. Run WSI on the cluster data
+    substitute_wsi = None
+
+    if wsi_algorithm == 'substitute':
+        # Use substitution-based WSI
+        print(f"--- Running Substitute-based Micro WSI ---")
+
+        # Need to load embedder for MLM predictions
+        from semantic_change.embedding import BertEmbedder
+        model_name = metadata.get('model_name', 'bert-base-uncased')
+        print(f"Loading embedder for MLM substitutes: {model_name}")
+        embedder = BertEmbedder(model_name=model_name)
+
+        # Prepare sentences and spans
+        all_sentences = list(sentences)
+        all_spans = list(spans)
+
+        if not all_spans or len(all_spans) != len(all_sentences):
+            print("Warning: Target spans not available. Falling back to HDBSCAN.")
+            wsi_algorithm = 'hdbscan'
+        else:
+            sense_labels, substitute_wsi = run_substitute_wsi_analysis(
+                embedder=embedder,
+                sentences=all_sentences,
+                target_spans=all_spans,
+                min_cluster_size=min_cluster_size,
+                resolution=1.0,
+                k_substitutes=5,
+                filter_model=substitute_filter_model,
+                merge_threshold=substitute_merge_threshold
+            )
+
+    if wsi_algorithm != 'substitute':
+        # Use embedding-based WSI
+        clustering_embeddings = embeddings
+
+        if clustering_reduction:
+            print(f"--- Pre-clustering Reduction: {clustering_reduction.upper()} "
+                  f"(n={clustering_n_components}) ---")
+            clustering_embeddings = apply_dimensionality_reduction(
+                embeddings,
+                clustering_reduction,
+                clustering_n_components,
+                umap_n_neighbors=umap_n_neighbors,
+                umap_min_dist=umap_min_dist,
+                umap_metric=umap_metric,
+                tsne_perplexity=tsne_perplexity
+            )
+
+        print(f"--- Running Micro WSI ({wsi_algorithm.upper()}) ---")
+        sense_labels = run_word_sense_induction(
+            clustering_embeddings,
+            wsi_algorithm,
+            min_cluster_size,
+            n_clusters
+        )
+
+    # 3. Prepare visualization data
+    print(f"--- Visualizing (reduction: {viz_reduction.upper()}) ---")
+    print(f"  Embeddings: {len(embeddings)}, sense_labels: {len(sense_labels)}, unique senses: {np.unique(sense_labels)}")
+
+    sub_embs, sub_sense_labs, sub_sents, sub_fnames, sub_spans, sub_indices = \
+        subsample_for_visualization(
+            embeddings,
+            sense_labels,
+            sentences,
+            filenames,
+            viz_max_instances,
+            list(spans) if spans is not None else None
+        )
+
+    print(f"  After subsampling: {len(sub_embs)} points")
+    sub_time_labs = time_labels[sub_indices]
+
+    # Compute 2D projection
+    print("Computing 2D projection...")
+    viz = Visualizer(method=viz_reduction)
+    embeddings_2d = viz.fit_transform(sub_embs)
+
+    viz_data = VisualizationData(
+        embeddings_2d=embeddings_2d,
+        sense_labels=sub_sense_labs,
+        time_labels=sub_time_labs,
+        sentences=sub_sents,
+        filenames=sub_fnames,
+        highlight_spans=sub_spans,
+        original_indices=sub_indices
+    )
+
+    # 4. Create visualizations with micro prefix
+    target_word = metadata.get('target_word', 'unknown')
+    original_cluster = metadata.get('original_cluster_id', 0)
+    project_id = metadata.get('project_id', '0000')
+    model_name = metadata.get('model_name', 'unknown')
+
+    # Generate micro-specific filename prefix
+    model_short = get_model_short_name(model_name)
+    micro_prefix = f"micro_k{project_id}_{model_short}_{target_word}_c{original_cluster}_"
+
+    def make_path(base_name: str) -> str:
+        return os.path.join(output_dir, f"{micro_prefix}{base_name}")
+
+    print("Plotting Micro Clustering by Time...")
+    viz.plot_clustering(
+        viz_data.embeddings_2d,
+        labels=viz_data.time_labels,
+        sentences=viz_data.sentences,
+        filenames=viz_data.filenames,
+        title=f"Micro: '{target_word}' Cluster {original_cluster} by Time Period",
+        save_path=make_path("time_period.html"),
+        highlight_spans=viz_data.highlight_spans
+    )
+
+    print("Plotting Micro Clustering by Sub-Sense...")
+    viz.plot_clustering(
+        viz_data.embeddings_2d,
+        labels=viz_data.sense_labels,
+        sentences=viz_data.sentences,
+        filenames=viz_data.filenames,
+        title=f"Micro: '{target_word}' Cluster {original_cluster} by Sub-Sense",
+        save_path=make_path("sense_clusters.html"),
+        highlight_spans=viz_data.highlight_spans
+    )
+
+    print("Plotting Micro Combined Sense × Time...")
+    viz.plot_combined_clustering(
+        viz_data.embeddings_2d,
+        sense_labels=viz_data.sense_labels,
+        time_labels=list(viz_data.time_labels),
+        sentences=viz_data.sentences,
+        filenames=viz_data.filenames,
+        title=f"Micro: '{target_word}' Cluster {original_cluster} by Sub-Sense × Time",
+        save_path=make_path("sense_time_combined.html"),
+        highlight_spans=viz_data.highlight_spans
+    )
+
+    # Create neighbor plots for micro sub-clusters
+    print("Creating Micro Neighbor Plots...")
+    try:
+        vector_store = VectorStore(persistence_path="data/chroma_db")
+        safe_model = model_name.replace("/", "_").replace("-", "_")
+        coll_t1, coll_t2 = vector_store.get_collection_names_for_model(project_id, safe_model)
+
+        if coll_t1 or coll_t2:
+            unique_clusters = sorted(set(sense_labels))
+            for cluster_id in unique_clusters:
+                cluster_mask = sense_labels == cluster_id
+                cluster_embs = embeddings[cluster_mask]
+
+                if len(cluster_embs) == 0:
+                    continue
+
+                centroid = cluster_embs.mean(axis=0)
+                neighbors_t1, neighbors_t2 = [], []
+
+                if coll_t1:
+                    neighbors_t1 = vector_store.query_neighbors(coll_t1, centroid, k=10)
+                if coll_t2:
+                    neighbors_t2 = vector_store.query_neighbors(coll_t2, centroid, k=10)
+
+                # Get period labels from metadata or use defaults
+                period_t1_label = metadata.get('period_t1_label', 't1')
+                period_t2_label = metadata.get('period_t2_label', 't2')
+
+                # Create neighbor table
+                neighbor_path = make_path(f"neighbors_cluster_{cluster_id}.html")
+                viz.plot_neighbor_table(
+                    neighbors_t1=neighbors_t1,
+                    neighbors_t2=neighbors_t2,
+                    title=f"Micro: '{target_word}' Sub-Cluster {cluster_id} Neighbors",
+                    save_path=neighbor_path,
+                    period_t1_label=period_t1_label,
+                    period_t2_label=period_t2_label
+                )
+
+                # Create neighbor graph
+                graph_path = make_path(f"neighbors_graph_cluster_{cluster_id}.html")
+                viz.plot_neighbor_graph(
+                    neighbors_t1=neighbors_t1,
+                    neighbors_t2=neighbors_t2,
+                    title=f"Micro: '{target_word}' Sub-Cluster {cluster_id} Neighbor Graph",
+                    save_path=graph_path,
+                    period_t1_label=period_t1_label,
+                    period_t2_label=period_t2_label
+                )
+        else:
+            print("  No embedding collections found, skipping neighbor plots.")
+    except Exception as e:
+        print(f"  Could not create neighbor plots: {e}")
+
+    # Create substitute graph if applicable
+    if substitute_wsi is not None and substitute_wsi.graph_ is not None:
+        print("Plotting Micro Substitute Co-occurrence Graph...")
+        viz.plot_substitute_graph(
+            graph=substitute_wsi.graph_,
+            communities=substitute_wsi.communities_,
+            title=f"Micro: '{target_word}' Cluster {original_cluster} Substitute Graph",
+            save_path=make_path("substitute_graph.html"),
+            max_nodes=60
+        )
+
+    print("Micro analysis done!")
+
+    return {
+        'sense_labels': sense_labels,
+        'embeddings': embeddings,
+        'sentences': sentences,
+        'filenames': filenames,
+        'time_labels': time_labels,
+        'spans': spans,
+        'metadata': metadata,
+        'viz_prefix': micro_prefix,
+    }
 
 
 # =============================================================================
