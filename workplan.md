@@ -118,7 +118,7 @@ The following optimizations target `batch_extract()` in `embedding.py` and `proc
 
 
 
-## V. Major Feature: Substitution-based WSI (Eyal et al., 2022)
+## V. Major Feature: Substitution-based WSI (Eyal et al., 2022) ✅
 
 Implement the graph-based Word Sense Induction approach based on "Large Scale Substitution-based Word Sense Induction", which uses MLM top-k substitutes instead of dense vectors for clustering.
 
@@ -129,19 +129,23 @@ Implement the graph-based Word Sense Induction approach based on "Large Scale Su
     - Returns a list of lists: `[[substitute1, substitute2, ...], ...]` for each sentence instance.
 
 ### 2. Graph Construction & Clustering (`src/semantic_change/wsi.py`)
-- [ ] **Implement Graph Builder**:
+- [x] **Implement Graph Builder**:
     - Create a co-occurrence graph where nodes are substitute words.
     - Edges are weighted by how often two substitutes appear together in the top-k predictions for the same instance.
-- [ ] **Implement Community Detection**:
+    - **Implemented**: `SubstituteWSI._build_cooccurrence_graph()` method
+- [x] **Implement Community Detection**:
     - Add `louvain` or `leiden` algorithm support (using `python-louvain` or `cdlib`).
     - The communities detected in this graph become the "senses".
-- [ ] **Instance Tagging**:
+    - **Implemented**: Uses `community_louvain.best_partition()` with configurable resolution
+- [x] **Instance Tagging**:
     - Assign each original sentence to a sense cluster by calculating the Jaccard similarity between its instance-specific substitutes and the sense's representative words.
+    - **Implemented**: `SubstituteWSI.predict()` method with Jaccard similarity
 
 ### 3. Integration & Visualization (`src/main.py`, `src/semantic_change/visualization.py`)
-- [ ] **New Visualization**:
+- [x] **New Visualization**:
     - Create a graph visualization (using `networkx` + `plotly`) showing the community structure of the substitutes.
     - Nodes are words, edges reflect the distance, colors indicate the sense cluster.
+    - **Implemented**: `Visualizer.plot_substitute_graph()` method
 
 
 ## VI. Major Feature: Add more WSI methods and measures for semantic change detection
@@ -170,12 +174,12 @@ Implement the graph-based Word Sense Induction approach based on "Large Scale Su
 - [ ] **Wasserstein Distance (WD)** [100]: Optimal transport cost to reconfigure cluster distribution.
 
 ### 2. Add more WSI methods
-(numbers refer to the reference section in Periti, Montanelli 2024 in the subdir ./references) 
+(numbers refer to the reference section in Periti, Montanelli 2024 in the subdir ./references)
 - [ ] Affinity Propagation (AP)
 - [ ] Gaussian Mixture Models (GMMs) [118]
-- [ ] agglomerative clustering (AGG) (e.g., Reference [7])
+- [x] agglomerative clustering (AGG) (e.g., Reference [7]) - **Implemented in `WordSenseInductor`**
 - [ ] DBSCAN (e.g., Reference [65])
-- [ ] HDBSCAN (e.g., Reference [118]) [Check this against our implementation]
+- [x] HDBSCAN (e.g., Reference [118]) - **Implemented in `WordSenseInductor`**
 - [ ] Balanced Iterative Reducing and Clustering using Hierarchies (BIRCH) (e.g., Reference [118])
 - [ ] A Posteriori affinity Propagation (APP) (e.g., Reference [105])
 - [ ] Incremental Affinity Propagation based on Nearest neighbor Assignment (IAPNA)
