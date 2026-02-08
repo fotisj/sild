@@ -451,7 +451,6 @@ def run_batch_embedding_process(
     project_id: str,
     db_t1: str, db_t2: str,
     model_name: str, min_freq: int,
-    custom_words: list[str],
     test_mode: bool = False,
     max_samples: int = 200,
     pooling_strategy: str = "mean",
@@ -491,7 +490,6 @@ def run_batch_embedding_process(
                     model_name=model_name,
                     min_freq=min_freq,
                     max_samples=max_samples,
-                    additional_words=custom_words,
                     reset_collections=not resume,  # Do not reset if resuming
                     test_mode=test_mode,
                     tqdm_class=stqdm,
@@ -512,11 +510,11 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
     st.subheader("Generate Embeddings")
     st.info("This process uses the chosen model to compute vector representations for the words in your ingested corpus.")
 
+    model_name = render_model_selector(config)
+    config["model_name"] = model_name
+
     col1, col2 = st.columns(2)
     with col1:
-        model_name = render_model_selector(config)
-        config["model_name"] = model_name
-
         min_freq = st.number_input(
             "Minimum Frequency",
             min_value=5,
@@ -525,6 +523,7 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
         )
         config["min_freq"] = min_freq
 
+    with col2:
         max_samples = st.number_input(
             "Max Samples per Word",
             min_value=10,
@@ -533,13 +532,6 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
             help="Maximum number of sentence samples to collect per word per period."
         )
         config["batch_max_samples"] = max_samples
-
-    with col2:
-        custom_words_input = st.text_area(
-            "Custom Words (optional)",
-            placeholder="e.g. apple, banana\n(comma or newline separated)",
-            help="Add specific words to the batch processing list, regardless of frequency.",
-        )
 
     # Test mode option
     test_mode = st.checkbox(
@@ -584,13 +576,8 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
     with col_start:
         if st.button("Start Batch Process", type="primary"):
             save_config(config)
-            custom_words = []
-            if custom_words_input:
-                raw_words = custom_words_input.replace("\n", ",").split(",")
-                custom_words = [w.strip() for w in raw_words if w.strip()]
-
             run_batch_embedding_process(
-                config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
+                config["project_id"], db_t1, db_t2, model_name, min_freq,
                 test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy,
                 layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean"),
                 staged=staged_mode,
@@ -602,13 +589,8 @@ def render_create_embeddings_tab(config: dict, db_t1: str, db_t2: str) -> None:
         if staged_mode:
             if st.button("Resume Batch Process", help="Resume interrupted processing from staged files."):
                 save_config(config)
-                custom_words = []
-                if custom_words_input:
-                    raw_words = custom_words_input.replace("\n", ",").split(",")
-                    custom_words = [w.strip() for w in raw_words if w.strip()]
-
                 run_batch_embedding_process(
-                    config["project_id"], db_t1, db_t2, model_name, min_freq, custom_words,
+                    config["project_id"], db_t1, db_t2, model_name, min_freq,
                     test_mode=test_mode, max_samples=max_samples, pooling_strategy=pooling_strategy,
                     layers=config.get("layers", [-1]), layer_op=config.get("layer_op", "mean"),
                     staged=staged_mode,

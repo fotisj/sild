@@ -582,7 +582,6 @@ def run_batch_generation(
     model_name="bert-base-uncased",
     min_freq=25,
     max_samples=200,
-    additional_words: List[str] = None,
     db_path_1800=None,
     db_path_1900=None,
     output_dir_1800=None,
@@ -747,15 +746,11 @@ def run_batch_generation(
     else:
         # --- Period 1 ---
         words_t1 = get_frequent_words(db_path_t1, min_freq=min_freq, pos_filter=pos_filter)
-        if additional_words:
-            words_t1 = sorted(list(set(words_t1 + additional_words)))
         print(f"\n[{time.strftime('%H:%M:%S')}] Found {len(words_t1)} words in T1")
         sys.stdout.flush()
 
         # --- Period 2 ---
         words_t2 = get_frequent_words(db_path_t2, min_freq=min_freq, pos_filter=pos_filter)
-        if additional_words:
-            words_t2 = sorted(list(set(words_t2 + additional_words)))
         print(f"\n[{time.strftime('%H:%M:%S')}] Found {len(words_t2)} words in T2")
         sys.stdout.flush()
 
@@ -814,7 +809,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="bert-base-uncased", help="HuggingFace model name")
     parser.add_argument("--min-freq", type=int, default=25, help="Minimum frequency for content words")
     parser.add_argument("--max-samples", type=int, default=200, help="Max samples per word per period")
-    parser.add_argument("--words", type=str, default="", help="Comma-separated list of additional words")
     parser.add_argument("--reset", action="store_true", help="Delete existing collections before processing")
     parser.add_argument("--pos", type=str, default="NOUN,VERB,ADJ,ADV", help="Comma-separated POS tags to include")
     parser.add_argument("--batch-size", type=int, default=None, help="Embedding batch size (auto-detects based on GPU VRAM if not specified)")
@@ -847,7 +841,6 @@ if __name__ == "__main__":
         project_id = pm.ensure_default_project(db_t1=args.db_t1, db_t2=args.db_t2)
         print(f"Using project: {project_id}")
 
-    user_words = [w.strip() for w in args.words.split(',')] if args.words else []
     user_pos = [p.strip().upper() for p in args.pos.split(',')] if args.pos else ('NOUN', 'VERB', 'ADJ', 'ADV')
     user_layers = [int(l.strip()) for l in args.layers.split(',')] if args.layers else [-1]
 
@@ -858,7 +851,6 @@ if __name__ == "__main__":
         model_name=args.model,
         min_freq=args.min_freq,
         max_samples=args.max_samples,
-        additional_words=user_words,
         reset_collections=args.reset,
         pos_filter=user_pos,
         embed_batch_size=args.batch_size,

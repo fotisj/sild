@@ -80,7 +80,7 @@ The following optimizations target `batch_extract()` in `embedding.py` and `proc
 
 ### III. Refactoring: Separation of Concerns & Cleanup
 
-- [ ] **Remove Custom Words Option**:
+- [x] **Remove Custom Words Option**:
     - Remove the capability to compute embeddings for specific manual words, focusing instead on frequency-based batch processing.
     - **Update GUI**: Remove the "Custom Words" text area from `src/gui_app.py` (`render_create_embeddings_tab`).
     - **Update Logic**: Remove the `additional_words` parameter from `run_batch_generation` in `src/semantic_change/embeddings_generation.py`.
