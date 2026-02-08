@@ -86,7 +86,7 @@ The following optimizations target `batch_extract()` in `embedding.py` and `proc
     - **Update Logic**: Remove the `additional_words` parameter from `run_batch_generation` in `src/semantic_change/embeddings_generation.py`.
     - **Update CLI**: Remove the `--words` argument from the CLI parser.
 
-- [ ] **Implement MVC Architecture (Clear Separation of Concerns)**:
+- [x] **Implement MVC Architecture (Clear Separation of Concerns)**:
     - **Goal**: Move all business logic out of `src/gui_app.py` into dedicated service/controller modules in `src/semantic_change/` or a new `src/controllers/` package. The GUI should only handle rendering and user input.
     - **Tasks**:
         - **Stats Service**: Move logic from `render_db_stats_summary` (direct DB/Chroma queries) to a new `src/semantic_change/services.py` or `reporting.py`.
@@ -94,7 +94,7 @@ The following optimizations target `batch_extract()` in `embedding.py` and `proc
         - **Embedding Management**: Move `delete_model_embeddings` logic to `src/semantic_change/vector_store.py` or a manager class.
         - **Configuration**: Ensure `load_config`/`save_config` are handled by a dedicated config manager.
 
-- [ ] **Decouple CLI from Core Logic**:
+- [x] **Decouple CLI from Core Logic**:
     - **Goal**: Ensure files in `src/semantic_change/` are pure library modules without `if __name__ == "__main__":` blocks or `argparse` logic.
     - **Action**:
         - Remove CLI code from `src/semantic_change/embeddings_generation.py`.
@@ -102,18 +102,19 @@ The following optimizations target `batch_extract()` in `embedding.py` and `proc
     - **Benefit**: Improves testability and strictly separates the "User Interface" (CLI) from the "Business Logic".
 
 
-## IV. Testing & Quality Assurance
+## IV. Testing & Quality Assurance ✅
 
-- [ ] **Implement Unit Testing Suite**:
+- [x] **Implement Unit Testing Suite**:
     - Set up `pytest` as the primary testing framework.
     - Create a `tests/` directory to house test modules.
-- [ ] **Core Logic Tests**:
-    - **`corpus.py`**: Test SQLite connection, metadata retrieval, and sentence sampling.
-    - **`ingestor.py`**: Test raw file processing, tokenization accuracy, and database population.
-    - **`embedding.py`**: Test vector extraction (using small/mock models) and alignment logic.
-    - **`wsi.py`**: Test clustering consistency with dummy data.
-- [ ] **Integration Tests**:
+- [x] **Core Logic Tests** (108 tests total):
+    - **`corpus.py`**: Test SQLite connection, metadata retrieval, and sentence sampling (test_corpus.py - 19 tests).
+    - **`ingestor.py`**: Test database schema creation, table structure, and data insertion (test_ingestor.py - 10 tests).
+    - **`embedding.py`**: Test utility functions, pooling strategies, and class structure (test_embedding.py - 12 tests).
+    - **`wsi.py`**: Test clustering consistency with KMeans, HDBSCAN, Spectral, Agglomerative, and SubstituteWSI (test_wsi.py - 21 tests).
+- [x] **Integration Tests** (test_integration.py - 9 tests):
     - Verify the end-to-end flow from raw text ingestion to embedding generation and basic analysis.
+    - Test corpus-to-embedding flow, WSI clustering flow, stats service integration, config manager, and cluster service.
 
 
 
@@ -122,7 +123,7 @@ The following optimizations target `batch_extract()` in `embedding.py` and `proc
 Implement the graph-based Word Sense Induction approach based on "Large Scale Substitution-based Word Sense Induction", which uses MLM top-k substitutes instead of dense vectors for clustering.
 
 ### 1. MLM Substitute Generation (`src/semantic_change/embedding.py`)
-- [ ] **Extend `BertEmbedder`**: Add a method `generate_substitutes(sentences, k=5)` that:
+- [x] **Extend `BertEmbedder`**: Add a method `generate_substitutes(sentences, k=5)` that:
     - Tokenizes sentences and masks the target word.
     - Runs the MLM head to predict the top-k most probable *complete* words (handling BPE tokenization issues described in `workplan3.md`).
     - Returns a list of lists: `[[substitute1, substitute2, ...], ...]` for each sentence instance.
