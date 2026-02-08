@@ -48,74 +48,21 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
-CONFIG_FILE = "config.json"
+# Import refactored modules
+from semantic_change.config_manager import (
+    load_config,
+    save_config,
+    get_db_paths,
+    check_databases_exist,
+    ensure_project_id,
+)
+from utils.dependencies import check_spacy_transformer_deps
+from semantic_change.services import StatsService, ClusterService
+
 OUTPUT_DIR = "output"
 
 # Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-
-# =============================================================================
-# Configuration Management
-# =============================================================================
-
-def get_default_config() -> dict:
-    """Returns the default configuration dictionary."""
-    return {
-        "project_id": "",  # Will be auto-generated if empty
-        "data_dir": "data",
-        "input_dir_t1": "data_gutenberg/1800",
-        "input_dir_t2": "data_gutenberg/1900",
-        "period_t1_label": "1800",
-        "period_t2_label": "1900",
-        "file_encoding": "utf-8",
-        "max_files": None,
-        "spacy_model": "en_core_web_sm",
-        "model_name": "bert-base-uncased",
-        "target_word": "current",
-        "k_neighbors": 10,
-        "min_cluster_size": 3,
-        "n_clusters": 3,
-        "wsi_algorithm": "hdbscan",
-        "pos_filter": "None",
-        "clustering_reduction": "None",
-        "clustering_n_components": 50,
-        "umap_n_neighbors": 15,
-        "umap_min_dist": 0.1,
-        "umap_metric": "euclidean",
-        "tsne_perplexity": 30,
-        "viz_reduction": "pca",
-        "use_umap": True,
-        "umap_n_components": 50,
-        "n_samples": 50,
-        "viz_max_instances": 100,
-        "min_freq": 25,
-        "layers": [-1],
-        "layer_op": "mean",
-        "lang": "en",
-        "context_window": 0,
-        "exact_match": False,
-        "pooling_strategy": "mean",
-    }
-
-
-def load_config() -> dict:
-    """Loads configuration from file, merging with defaults."""
-    default = get_default_config()
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            loaded = json.load(f)
-            for key, val in default.items():
-                if key not in loaded:
-                    loaded[key] = val
-            return loaded
-    return default
-
-
-def save_config(config: dict) -> None:
-    """Saves configuration to file."""
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
 
 
 # =============================================================================
@@ -141,41 +88,6 @@ def capture_output(output_func):
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
-
-
-def get_db_paths(config: dict) -> tuple[str, str]:
-    """Returns the paths to both corpus databases."""
-    db_t1 = os.path.join(config["data_dir"], "corpus_t1.db")
-    db_t2 = os.path.join(config["data_dir"], "corpus_t2.db")
-    return db_t1, db_t2
-
-
-def check_databases_exist(db_t1: str, db_t2: str) -> bool:
-    """Checks if both corpus databases exist."""
-    return os.path.exists(db_t1) and os.path.exists(db_t2)
-
-
-def ensure_project_id(config: dict) -> str:
-    """
-    Ensures config has a valid project_id, creating one if necessary.
-    Updates the config dict in place and saves to file.
-    Returns the project_id.
-    """
-    if config.get("project_id"):
-        return config["project_id"]
-
-    from semantic_change.project_manager import ProjectManager
-    pm = ProjectManager()
-    db_t1, db_t2 = get_db_paths(config)
-    project_id = pm.ensure_default_project(
-        label_t1=config.get("period_t1_label", "t1"),
-        label_t2=config.get("period_t2_label", "t2"),
-        db_t1=db_t1,
-        db_t2=db_t2
-    )
-    config["project_id"] = project_id
-    save_config(config)
-    return project_id
 
 
 @st.cache_resource
@@ -217,7 +129,7 @@ def render_navigation() -> str:
     st.sidebar.title("Navigation")
     return st.sidebar.radio(
         "Go to",
-        ["Semantic Change Analysis", "Data Ingestion", "Embeddings & Models", "Corpus Reports"],
+        ["SCA Macro", "SCA Micro", "Data Ingestion", "Embeddings & Models", "Corpus Reports"],
     )
 
 
@@ -276,56 +188,6 @@ def render_ingestion_inputs(config: dict, period_t1_label: str, period_t2_label:
         config["input_dir_t2"] = input_t2
 
     return input_t1, input_t2
-
-
-def check_spacy_transformer_deps(model_name: str) -> tuple[bool, str]:
-    """
-    Check if transformer model dependencies are installed.
-    Returns (ready, message) - ready=True means we can proceed.
-    """
-    import subprocess
-    import sys
-
-    needs_restart = False
-    messages = []
-
-    # Check if this is a transformer model
-    if not model_name.endswith("_trf"):
-        return True, ""
-
-    # Check if spacy-curated-transformers is installed
-    try:
-        import spacy_curated_transformers
-    except ImportError:
-        messages.append("Installing spacy-curated-transformers...")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "spacy-curated-transformers"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return False, f"Failed to install spacy-curated-transformers: {result.stderr}"
-        needs_restart = True
-
-    # Check if the model is downloaded
-    try:
-        import spacy
-        spacy.util.get_package_path(model_name)
-    except (ImportError, Exception):
-        messages.append(f"Downloading spaCy model: {model_name}...")
-        result = subprocess.run(
-            [sys.executable, "-m", "spacy", "download", model_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return False, f"Failed to download model {model_name}: {result.stderr}"
-        needs_restart = True
-
-    if needs_restart:
-        return False, "Dependencies installed. Please restart the app to use transformer models."
-
-    return True, ""
 
 
 def render_max_files_selector(config: dict) -> int | None:
@@ -769,44 +631,26 @@ def render_manage_embeddings_tab(project_id: str) -> None:
 
                 st.write("Connecting to ChromaDB...")
                 store = get_vector_store()
-                # Sanitize model name for collection (matches how collections are created)
-                safe_model = model_to_delete.replace("/", "_").replace("-", "_")
-                coll_t1 = f"embeddings_{project_id}_t1_{safe_model}"
-                coll_t2 = f"embeddings_{project_id}_t2_{safe_model}"
 
-                # Check sizes first
-                try:
-                    count1 = store.count(coll_t1)
-                    st.write(f"Collection {coll_t1}: {count1} embeddings")
-                except:
-                    st.write(f"Collection {coll_t1}: not found or empty")
-                    count1 = 0
+                # Use the new delete_model_embeddings method
+                st.write("Deleting embeddings... (this may take a while for large collections)")
+                success, message, count_t1, count_t2 = store.delete_model_embeddings(
+                    project_id, model_to_delete
+                )
 
-                try:
-                    count2 = store.count(coll_t2)
-                    st.write(f"Collection {coll_t2}: {count2} embeddings")
-                except:
-                    st.write(f"Collection {coll_t2}: not found or empty")
-                    count2 = 0
-
-                st.write(f"Deleting {coll_t1}... (this may take a while for large collections)")
-                success1, msg1 = store.delete_collection(coll_t1)
-                st.write(f"Result: {msg1}")
-
-                st.write(f"Deleting {coll_t2}... (this may take a while for large collections)")
-                success2, msg2 = store.delete_collection(coll_t2)
-                st.write(f"Result: {msg2}")
+                if count_t1 > 0 or count_t2 > 0:
+                    st.write(f"Found {count_t1} + {count_t2} = {count_t1 + count_t2} embeddings")
+                st.write(f"Result: {message}")
 
                 # Clear cache again after deletion to ensure fresh state
                 clear_vector_store_cache()
 
-                if success1 or success2:
+                if success:
                     status.update(label=f"Deleted {model_to_delete}", state="complete")
                 else:
                     status.update(label=f"No embeddings found for {model_to_delete}", state="complete")
             except Exception as e:
                 status.update(label=f"Delete failed: {e}", state="error")
-                import traceback
                 st.code(traceback.format_exc())
             finally:
                 st.session_state["deleting_model"] = None
@@ -850,30 +694,28 @@ def render_embeddings_page(config: dict, db_t1: str, db_t2: str) -> None:
 # =============================================================================
 
 def render_db_stats_summary(config: dict, db_t1: str, db_t2: str, period_t1_label: str, period_t2_label: str) -> None:
-    """Displays a summary of database statistics."""
-    from semantic_change.corpus import Corpus
+    """Displays a summary of database statistics using StatsService."""
+    stats_service = StatsService()
 
     # SQLite stats
     st.markdown("#### Database Status")
 
-    try:
-        corpus1 = Corpus(period_t1_label, "", db_t1)
-        corpus2 = Corpus(period_t2_label, "", db_t2)
-        stats1 = corpus1.get_stats()
-        stats2 = corpus2.get_stats()
+    stats1 = stats_service.get_corpus_stats(db_t1, period_t1_label)
+    stats2 = stats_service.get_corpus_stats(db_t2, period_t2_label)
 
-        total_docs = stats1.get("files", 0) + stats2.get("files", 0)
-        total_sents = stats1.get("sentences", 0) + stats2.get("sentences", 0)
-        total_tokens = stats1.get("tokens", 0) + stats2.get("tokens", 0)
+    if stats1 and stats2:
+        total_docs = stats1.files + stats2.files
+        total_sents = stats1.sentences + stats2.sentences
+        total_tokens = stats1.tokens + stats2.tokens
 
         st.code(
             f"SQLite:  {total_docs:,} documents, {total_sents:,} sentences, {total_tokens:,} tokens\n"
-            f"  {period_t1_label}:     {stats1.get('files', 0):,} documents, {stats1.get('sentences', 0):,} sentences, {stats1.get('tokens', 0):,} tokens\n"
-            f"  {period_t2_label}:     {stats2.get('files', 0):,} documents, {stats2.get('sentences', 0):,} sentences, {stats2.get('tokens', 0):,} tokens",
+            f"  {period_t1_label}:     {stats1.files:,} documents, {stats1.sentences:,} sentences, {stats1.tokens:,} tokens\n"
+            f"  {period_t2_label}:     {stats2.files:,} documents, {stats2.sentences:,} sentences, {stats2.tokens:,} tokens",
             language=None
         )
-    except Exception as e:
-        st.warning(f"Could not read SQLite stats: {e}")
+    else:
+        st.warning("Could not read SQLite stats")
 
     # ChromaDB stats
     try:
@@ -883,48 +725,21 @@ def render_db_stats_summary(config: dict, db_t1: str, db_t2: str, period_t1_labe
         available_models = store.get_available_models(project_id) if project_id else []
 
         if available_models:
-            # Get stats for first available model
+            # Get stats for first available model using StatsService
             model = available_models[0]
-            # Sanitize model name for collection (matches how collections are created)
-            safe_model = model.replace("/", "_").replace("-", "_")
-            coll_t1 = f"embeddings_{project_id}_t1_{safe_model}"
-            coll_t2 = f"embeddings_{project_id}_t2_{safe_model}"
-            count_t1 = store.count(coll_t1)
-            count_t2 = store.count(coll_t2)
-            total_embeddings = count_t1 + count_t2
+            embedding_stats = stats_service.get_embedding_stats(project_id, model)
 
-            # Get unique words and threshold
-            unique_words = "N/A"
-            threshold = config.get("min_freq", "N/A")
-
-            # Count unique lemmas using batched queries to avoid memory issues
-            try:
-                c1 = store.get_or_create_collection(coll_t1)
-                c2 = store.get_or_create_collection(coll_t2)
-
-                all_lemmas = set()
-                batch_size = 10000
-
-                # Process each collection in batches
-                for coll, count in [(c1, count_t1), (c2, count_t2)]:
-                    if count == 0:
-                        continue
-                    for offset in range(0, count, batch_size):
-                        batch = coll.get(include=["metadatas"], limit=batch_size, offset=offset)["metadatas"]
-                        for m in batch:
-                            all_lemmas.add(m.get("lemma"))
-
-                unique_words = len(all_lemmas)
-            except Exception as e:
-                unique_words = f"N/A ({e})"
-
-            st.code(
-                f"Chroma ({model}):\n"
-                f"  Total:           {total_embeddings:,} embeddings\n"
-                f"  Unique Words:    {unique_words}\n"
-                f"  Freq. Threshold: {threshold}",
-                language=None
-            )
+            if embedding_stats:
+                threshold = config.get("min_freq", "N/A")
+                st.code(
+                    f"Chroma ({model}):\n"
+                    f"  Total:           {embedding_stats.total_embeddings:,} embeddings\n"
+                    f"  Unique Words:    {embedding_stats.unique_lemmas}\n"
+                    f"  Freq. Threshold: {threshold}",
+                    language=None
+                )
+            else:
+                st.code(f"Chroma ({model}): Could not read stats", language=None)
         else:
             st.code("Chroma: No embeddings found", language=None)
     except Exception as e:
@@ -1408,7 +1223,7 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
             pos_filter = None if params["pos_filter"] == "None" else params["pos_filter"]
 
             with capture_output(update_logs):
-                run_single_analysis(
+                results = run_single_analysis(
                     project_id=config["project_id"],
                     target_word=params["target_word"],
                     db_path_t1=db_t1,
@@ -1437,6 +1252,19 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
                 )
 
             st.success("Analysis Complete!")
+
+            # Store analysis results and metadata in session state for drill-down
+            if results is not None:
+                st.session_state['analysis_results'] = results
+                st.session_state['analysis_metadata'] = {
+                    'project_id': config["project_id"],
+                    'model_name': params["model_name"],
+                    'target_word': params["target_word"],
+                    'pos_filter': pos_filter,
+                    'n_samples': params["n_samples"],
+                    'wsi_algorithm': params["wsi_algorithm"],
+                }
+
             # Store visualization parameters in session state for persistence
             st.session_state['last_viz_params'] = {
                 'project_id': config["project_id"],
@@ -1453,6 +1281,33 @@ def run_analysis(config: dict, params: dict, db_t1: str, db_t2: str, period_t1_l
         except Exception as e:
             st.error(f"Analysis failed: {e}")
             st.exception(e)
+
+
+def save_cluster_for_drilldown(cluster_id: int) -> str:
+    """
+    Save a sense cluster's data for drill-down analysis.
+
+    Args:
+        cluster_id: The cluster ID to save
+
+    Returns:
+        Path to the saved .npz file
+    """
+    results = st.session_state['analysis_results']
+    metadata = st.session_state['analysis_metadata']
+
+    # Use ClusterService to save the data
+    return ClusterService.save_for_drilldown(
+        embeddings=results['combined_embeddings'],
+        sentences=results['combined_sentences'],
+        filenames=results['combined_filenames'],
+        time_labels=results['combined_time_labels'],
+        sense_labels=results['sense_labels'],
+        spans=results['combined_spans'],
+        metadata=metadata,
+        cluster_id=cluster_id,
+        output_dir=OUTPUT_DIR
+    )
 
 
 def display_visualizations(
@@ -1492,6 +1347,26 @@ def display_visualizations(
             st.markdown(f"### {title}")
             with open(path, "r", encoding="utf-8") as f:
                 st.components.v1.html(f.read(), height=600, scrolling=True)
+
+            # Add drill-down UI after sense_clusters.html
+            if base_filename == "sense_clusters.html" and 'analysis_results' in st.session_state:
+                results = st.session_state['analysis_results']
+                unique_clusters = sorted(set(results['sense_labels']))
+
+                st.markdown("#### Save Cluster for Drill Down")
+                col_select, col_button = st.columns([2, 1])
+                with col_select:
+                    selected_cluster = st.selectbox(
+                        "Select Cluster",
+                        options=unique_clusters,
+                        format_func=lambda x: f"Cluster {x} ({sum(results['sense_labels'] == x)} instances)",
+                        key="drilldown_cluster_select"
+                    )
+                with col_button:
+                    if st.button("Save for Drill Down", key="save_drilldown_btn"):
+                        filepath = save_cluster_for_drilldown(selected_cluster)
+                        st.success(f"Saved to `{filepath}`")
+                        st.info("Go to **SCA Micro** page to analyze this cluster.")
 
     # Neighbor Graph files (shown first)
     if prefix:
@@ -1645,6 +1520,434 @@ def render_dashboard_page(
 
 
 # =============================================================================
+# SCA Micro (Drill-Down) Page
+# =============================================================================
+
+def load_cluster_data(filepath: str) -> None:
+    """Load cluster data from .npz file into session state."""
+    import numpy as np
+
+    try:
+        data = np.load(filepath, allow_pickle=True)
+        metadata = json.loads(str(data['metadata']))
+
+        st.session_state['micro_cluster_data'] = {
+            'embeddings': data['embeddings'],
+            'sentences': data['sentences'],
+            'filenames': data['filenames'],
+            'time_labels': data['time_labels'],
+            'spans': data['spans'],
+            'metadata': metadata,
+            'filepath': filepath,
+        }
+    except Exception as e:
+        st.error(f"Failed to load cluster file: {e}")
+
+
+def display_micro_cluster_info() -> None:
+    """Display loaded cluster metadata."""
+    if 'micro_cluster_data' not in st.session_state:
+        return
+
+    data = st.session_state['micro_cluster_data']
+    metadata = data['metadata']
+
+    st.markdown("#### Loaded Cluster Info")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Instances", len(data['embeddings']))
+    with col2:
+        st.metric("Original Cluster", metadata.get('original_cluster_id', '?'))
+    with col3:
+        st.metric("Target Word", metadata.get('target_word', '?'))
+
+    with st.expander("Full Metadata"):
+        st.json(metadata)
+
+
+def render_micro_wsi_parameters(config: dict) -> dict:
+    """Renders WSI parameters for micro analysis."""
+    params = {}
+    st.markdown("#### Micro WSI Parameters")
+
+    # Pre-clustering reduction
+    clust_options = ["None", "pca", "umap", "tsne"]
+    current_clust = config.get("clustering_reduction", "None")
+    if current_clust not in clust_options:
+        current_clust = "None"
+
+    params["clustering_reduction"] = st.selectbox(
+        "Pre-clustering Reduction",
+        options=clust_options,
+        index=clust_options.index(current_clust),
+        help="Reduce dimensions before clustering.",
+        key="micro_clust_reduction"
+    )
+
+    if params["clustering_reduction"] != "None":
+        params["clustering_n_components"] = st.number_input(
+            "Clustering Reduction Dims",
+            min_value=2,
+            max_value=200,
+            value=config.get("clustering_n_components", 50),
+            key="micro_clust_dims"
+        )
+
+        if params["clustering_reduction"] == "umap":
+            params["umap_n_neighbors"] = st.slider(
+                "UMAP n_neighbors",
+                min_value=2,
+                max_value=200,
+                value=config.get("umap_n_neighbors", 15),
+                key="micro_umap_neighbors"
+            )
+            params["umap_min_dist"] = st.slider(
+                "UMAP min_dist",
+                min_value=0.0,
+                max_value=0.99,
+                value=config.get("umap_min_dist", 0.1),
+                step=0.05,
+                key="micro_umap_dist"
+            )
+            umap_metric_options = ["euclidean", "manhattan", "cosine", "correlation"]
+            current_metric = config.get("umap_metric", "euclidean")
+            if current_metric not in umap_metric_options:
+                current_metric = "euclidean"
+            params["umap_metric"] = st.selectbox(
+                "UMAP metric",
+                options=umap_metric_options,
+                index=umap_metric_options.index(current_metric),
+                key="micro_umap_metric"
+            )
+        elif params["clustering_reduction"] == "tsne":
+            params["tsne_perplexity"] = st.slider(
+                "t-SNE perplexity",
+                min_value=2,
+                max_value=100,
+                value=config.get("tsne_perplexity", 30),
+                key="micro_tsne_perp"
+            )
+    else:
+        params["clustering_n_components"] = config.get("clustering_n_components", 50)
+        params["umap_n_neighbors"] = config.get("umap_n_neighbors", 15)
+        params["umap_min_dist"] = config.get("umap_min_dist", 0.1)
+        params["umap_metric"] = config.get("umap_metric", "euclidean")
+        params["tsne_perplexity"] = config.get("tsne_perplexity", 30)
+
+    # Clustering algorithm
+    wsi_options = ["hdbscan", "kmeans", "spectral", "agglomerative", "substitute"]
+    current_algo = config["wsi_algorithm"]
+    if current_algo not in wsi_options:
+        current_algo = "hdbscan"
+    params["wsi_algorithm"] = st.selectbox(
+        "Clustering Algorithm",
+        options=wsi_options,
+        index=wsi_options.index(current_algo),
+        key="micro_wsi_algo"
+    )
+
+    if params["wsi_algorithm"] == "substitute":
+        st.info("Substitute-based WSI uses MLM predictions for clustering.")
+        filter_model_options = [
+            "en_core_web_sm", "en_core_web_lg",
+            "de_core_news_sm", "de_core_news_lg",
+            "Other (Custom)",
+        ]
+        current_filter = config.get("substitute_filter_model", "en_core_web_sm")
+        if current_filter and current_filter not in filter_model_options[:-1]:
+            default_idx = filter_model_options.index("Other (Custom)")
+        elif current_filter:
+            default_idx = filter_model_options.index(current_filter)
+        else:
+            default_idx = 0
+
+        selected_filter = st.selectbox(
+            "Filter Model",
+            filter_model_options,
+            index=default_idx,
+            key="micro_filter_model"
+        )
+        if selected_filter == "Other (Custom)":
+            params["substitute_filter_model"] = st.text_input(
+                "Custom spaCy Model",
+                value=current_filter if current_filter not in filter_model_options[:-1] else "",
+                key="micro_custom_filter"
+            )
+        else:
+            params["substitute_filter_model"] = selected_filter
+
+        params["substitute_merge_threshold"] = st.slider(
+            "Merge Threshold",
+            min_value=0.0,
+            max_value=0.6,
+            value=config.get("substitute_merge_threshold", 0.3),
+            step=0.05,
+            key="micro_merge_thresh"
+        )
+    else:
+        params["substitute_filter_model"] = config.get("substitute_filter_model")
+        params["substitute_merge_threshold"] = config.get("substitute_merge_threshold", 0.0)
+
+    if params["wsi_algorithm"] == "hdbscan":
+        params["min_cluster_size"] = st.number_input(
+            "Min Cluster Size",
+            min_value=2,
+            value=config["min_cluster_size"],
+            key="micro_min_cluster"
+        )
+        params["n_clusters"] = config["n_clusters"]
+    elif params["wsi_algorithm"] == "substitute":
+        params["min_cluster_size"] = st.number_input(
+            "Min Community Size",
+            min_value=2,
+            value=config["min_cluster_size"],
+            key="micro_min_community"
+        )
+        params["n_clusters"] = config["n_clusters"]
+    else:
+        params["n_clusters"] = st.number_input(
+            "Number of Clusters (k)",
+            min_value=2,
+            value=config["n_clusters"],
+            key="micro_n_clusters"
+        )
+        params["min_cluster_size"] = config["min_cluster_size"]
+
+    # Visualization
+    st.markdown("#### Visualization")
+    viz_options = ["pca", "umap", "tsne"]
+    current_viz = config.get("viz_reduction", "pca")
+    if current_viz not in viz_options:
+        current_viz = "pca"
+    params["viz_reduction"] = st.selectbox(
+        "Visualization Reduction",
+        options=viz_options,
+        index=viz_options.index(current_viz),
+        key="micro_viz_reduction"
+    )
+
+    params["viz_max_instances"] = st.number_input(
+        "Max Points per Cluster",
+        min_value=10,
+        max_value=2000,
+        value=config.get("viz_max_instances", 100),
+        key="micro_viz_max"
+    )
+
+    return params
+
+
+def run_micro_analysis_ui(params: dict) -> None:
+    """Run micro analysis and display results."""
+    if 'micro_cluster_data' not in st.session_state:
+        st.error("No cluster data loaded.")
+        return
+
+    data = st.session_state['micro_cluster_data']
+    filepath = data['filepath']
+
+    # Debug: show parameters being used
+    st.write("**Parameters being used:**")
+    st.write(f"- clustering_reduction: `{params.get('clustering_reduction')}`")
+    st.write(f"- wsi_algorithm: `{params.get('wsi_algorithm')}`")
+    st.write(f"- viz_reduction: `{params.get('viz_reduction')}`")
+
+    logs = []
+    log_area = st.empty()
+
+    def update_logs(text):
+        logs.append(text)
+        log_area.code("".join(logs))
+
+    with st.spinner("Running micro analysis..."):
+        try:
+            from main import run_micro_analysis
+
+            clust_red = params["clustering_reduction"] if params["clustering_reduction"] != "None" else None
+
+            with capture_output(update_logs):
+                results = run_micro_analysis(
+                    cluster_file=filepath,
+                    wsi_algorithm=params["wsi_algorithm"],
+                    min_cluster_size=params["min_cluster_size"],
+                    n_clusters=params["n_clusters"],
+                    clustering_reduction=clust_red,
+                    clustering_n_components=params.get("clustering_n_components", 50),
+                    umap_n_neighbors=params.get("umap_n_neighbors", 15),
+                    umap_min_dist=params.get("umap_min_dist", 0.1),
+                    umap_metric=params.get("umap_metric", "euclidean"),
+                    tsne_perplexity=params.get("tsne_perplexity", 30),
+                    viz_reduction=params["viz_reduction"],
+                    viz_max_instances=params["viz_max_instances"],
+                    output_dir=OUTPUT_DIR,
+                    substitute_filter_model=params.get("substitute_filter_model"),
+                    substitute_merge_threshold=params.get("substitute_merge_threshold", 0.0),
+                )
+
+            if results:
+                st.session_state['micro_viz_prefix'] = results['viz_prefix']
+                st.session_state['micro_analysis_success'] = True
+                st.rerun()  # Refresh to show new visualizations
+            else:
+                st.error("Micro analysis failed.")
+
+        except Exception as e:
+            st.error(f"Micro analysis failed: {e}")
+            st.exception(e)
+
+
+def display_micro_visualizations() -> None:
+    """Display micro analysis visualization files."""
+    if 'micro_viz_prefix' not in st.session_state:
+        return
+
+    prefix = st.session_state['micro_viz_prefix']
+
+    st.subheader("Micro Analysis Visualizations")
+
+    # Debug: show prefix and file modification times
+    st.caption(f"Prefix: `{prefix}`")
+
+    viz_files = [
+        ("time_period.html", "Time Period (Micro)"),
+        ("sense_clusters.html", "Sub-Sense Clusters (Micro)"),
+        ("sense_time_combined.html", "Sub-Sense × Time (Micro)"),
+        ("substitute_graph.html", "Substitute Graph (Micro)"),
+    ]
+
+    for base_filename, title in viz_files:
+        filename = f"{prefix}{base_filename}"
+        path = os.path.join(OUTPUT_DIR, filename)
+        if os.path.exists(path):
+            # Debug: show file modification time
+            import datetime
+            mtime = os.path.getmtime(path)
+            mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%H:%M:%S")
+            st.markdown(f"### {title}")
+            st.caption(f"File modified: {mtime_str}")
+            with open(path, "r", encoding="utf-8") as f:
+                st.components.v1.html(f.read(), height=600, scrolling=True)
+
+    # Display neighbor visualizations
+    neighbor_pattern = os.path.join(OUTPUT_DIR, f"{prefix}neighbors_cluster_*.html")
+    neighbor_files = sorted(glob.glob(neighbor_pattern))
+    if neighbor_files:
+        st.markdown("### 📊 Sub-Cluster Neighbors")
+        for nf in neighbor_files:
+            basename = os.path.basename(nf)
+            cluster_name = basename.replace(prefix, "").replace("neighbors_", "").replace(".html", "").replace("_", " ").title()
+            st.markdown(f"**{cluster_name}**")
+            with open(nf, "r", encoding="utf-8") as f:
+                st.components.v1.html(f.read(), height=400, scrolling=True)
+
+    # Display neighbor graph visualizations
+    graph_pattern = os.path.join(OUTPUT_DIR, f"{prefix}neighbors_graph_cluster_*.html")
+    graph_files = sorted(glob.glob(graph_pattern))
+    if graph_files:
+        st.markdown("### 🕸️ Sub-Cluster Neighbor Graphs")
+        for gf in graph_files:
+            basename = os.path.basename(gf)
+            cluster_name = basename.replace(prefix, "").replace("neighbors_graph_", "").replace(".html", "").replace("_", " ").title()
+            st.markdown(f"**{cluster_name}**")
+            with open(gf, "r", encoding="utf-8") as f:
+                st.components.v1.html(f.read(), height=600, scrolling=True)
+
+
+def get_cluster_file_label(filepath: str) -> str:
+    """
+    Parse cluster file metadata and return a user-friendly label.
+    Format: "word (project_id, model, cluster N)"
+    """
+    import numpy as np
+
+    try:
+        data = np.load(filepath, allow_pickle=True)
+        metadata = json.loads(str(data['metadata']))
+
+        word = metadata.get('target_word', '?')
+        project_id = metadata.get('project_id', '?')
+        model = metadata.get('model_name', '?')
+        cluster_id = metadata.get('original_cluster_id', '?')
+        n_instances = len(data['embeddings'])
+
+        # Shorten model name for display
+        if '/' in model:
+            model = model.split('/')[-1]
+        if len(model) > 20:
+            model = model[:17] + "..."
+
+        return f"{word} (k{project_id}, {model}, cluster {cluster_id}, n={n_instances})"
+    except Exception:
+        return os.path.basename(filepath)
+
+
+def render_micro_page(config: dict) -> None:
+    """Renders the SCA Micro (Drill-Down) page."""
+    st.title("🔬 SCA Micro - Drill Down Analysis")
+    st.markdown("""
+    Analyze a specific sense cluster in more detail. First save a cluster from
+    SCA Macro, then load it here for deeper analysis.
+    """)
+
+    # Check for saved clusters
+    clusters_dir = os.path.join(OUTPUT_DIR, "clusters")
+
+    if not os.path.exists(clusters_dir):
+        st.warning("No saved clusters found. Run SCA Macro first and save a cluster for drill-down.")
+        return
+
+    cluster_files = sorted(glob.glob(os.path.join(clusters_dir, "*.npz")))
+
+    if not cluster_files:
+        st.warning("No saved clusters found. Run SCA Macro first and save a cluster for drill-down.")
+        return
+
+    # Pre-load labels for all cluster files (cached in session state)
+    if 'cluster_file_labels' not in st.session_state:
+        st.session_state['cluster_file_labels'] = {}
+
+    for f in cluster_files:
+        if f not in st.session_state['cluster_file_labels']:
+            st.session_state['cluster_file_labels'][f] = get_cluster_file_label(f)
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.subheader("Load Cluster")
+
+        # File selector with parsed metadata labels
+        selected_file = st.selectbox(
+            "Select Cluster File",
+            options=cluster_files,
+            format_func=lambda x: st.session_state['cluster_file_labels'].get(x, os.path.basename(x)),
+            key="micro_file_select"
+        )
+
+        if st.button("Load Cluster", key="load_cluster_btn"):
+            load_cluster_data(selected_file)
+            st.rerun()
+
+        # Display loaded cluster info
+        if 'micro_cluster_data' in st.session_state:
+            display_micro_cluster_info()
+
+            st.markdown("---")
+            micro_params = render_micro_wsi_parameters(config)
+
+            if st.button("Run Micro Analysis", type="primary", key="run_micro_btn"):
+                run_micro_analysis_ui(micro_params)
+
+    with col2:
+        # Show success message after rerun
+        if st.session_state.get('micro_analysis_success'):
+            st.success("Micro Analysis Complete!")
+            del st.session_state['micro_analysis_success']
+
+        # Display visualizations if available
+        display_micro_visualizations()
+
+
+# =============================================================================
 # Main Application
 # =============================================================================
 
@@ -1678,8 +1981,10 @@ def main():
         render_embeddings_page(config, db_t1, db_t2)
     elif page == "Corpus Reports":
         render_reports_page(config, db_t1, db_t2, period_t1_label, period_t2_label, dbs_exist)
-    elif page == "Semantic Change Analysis":
+    elif page == "SCA Macro":
         render_dashboard_page(config, db_t1, db_t2, period_t1_label, period_t2_label, dbs_exist)
+    elif page == "SCA Micro":
+        render_micro_page(config)
 
 
 # Run the app

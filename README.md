@@ -53,7 +53,12 @@ If you are new to Python, follow these steps to get started:
 2.  **Install Dependencies:** This project uses `uv` for fast package management.
     ```bash
     pip install uv
-    uv pip install -r requirements.txt
+    uv sync
+    ```
+
+3.  **Run Tests:** Verify the installation with the test suite.
+    ```bash
+    uv run pytest tests/ -v
     ```
 
 ## Usage
@@ -115,6 +120,46 @@ See `user_guide.md` for detailed instructions on:
 1.  Pushing code and data to the cluster (`src.cli.hpc push`).
 2.  Submitting jobs (`src.cli.hpc submit`).
 3.  Pulling results back to your local machine (`src.cli.hpc pull`).
+
+## Project Structure
+
+```
+├── gui.py                  # Streamlit entry point
+├── main.py                 # CLI entry point
+├── config.json             # Runtime configuration
+├── pyproject.toml          # Dependencies and pytest config
+├── src/
+│   ├── gui_app.py          # Streamlit UI (view layer)
+│   ├── main.py             # CLI analysis logic
+│   ├── semantic_change/
+│   │   ├── config_manager.py   # Configuration management (AppConfig dataclass)
+│   │   ├── services.py         # Business logic (StatsService, ClusterService)
+│   │   ├── corpus.py           # SQLite corpus access
+│   │   ├── embedding.py        # Transformer embeddings (BertEmbedder)
+│   │   ├── vector_store.py     # ChromaDB cache for embeddings
+│   │   ├── wsi.py              # Word Sense Induction (clustering)
+│   │   ├── visualization.py    # Plotly interactive visualizations
+│   │   └── ingestor.py         # Corpus ingestion pipeline
+│   └── utils/
+│       └── dependencies.py     # Dependency checking utilities
+├── tests/                  # Unit tests (pytest)
+│   ├── test_config_manager.py
+│   ├── test_services.py
+│   ├── test_dependencies.py
+│   └── test_vector_store.py
+└── data/
+    ├── corpus_t1.db        # Ingested corpus (period 1)
+    ├── corpus_t2.db        # Ingested corpus (period 2)
+    └── chroma_db/          # Cached embeddings (ChromaDB)
+```
+
+### Architecture Notes
+
+The codebase follows an **MVC-like pattern**:
+- **View Layer** (`gui_app.py`): Handles Streamlit rendering and user input
+- **Service Layer** (`services.py`): Business logic for statistics and cluster operations
+- **Data Layer** (`corpus.py`, `vector_store.py`): Database and cache access
+- **Configuration** (`config_manager.py`): Centralized settings using dataclass pattern
 
 ## Contributors
 

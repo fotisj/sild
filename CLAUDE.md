@@ -11,9 +11,14 @@ This is a **Semantic Change Analysis Toolkit** for analyzing how word meanings e
 ### Setup
 ```bash
 pip install uv
-uv pip install -r requirements.txt
+uv sync
 python -m spacy download en_core_web_sm
 python -m spacy download en_core_web_lg  # For ingestion
+```
+
+### Run Tests
+```bash
+uv run pytest tests/ -v
 ```
 
 ### Data Ingestion (run once per corpus)
@@ -62,7 +67,25 @@ uv run python src/rank_semantic_change.py --output output/ranking.csv
 
 - **`visualization.py`**: `Visualizer` class for Plotly-based interactive plots. Supports PCA/t-SNE/UMAP dimensionality reduction. Creates scatter plots and k-NN graph visualizations.
 
-- **`vector_store.py`**: ChromaDB wrapper for caching pre-computed embeddings.
+- **`vector_store.py`**: ChromaDB wrapper for caching pre-computed embeddings. Key methods:
+  - `store_embeddings()`: Cache embeddings with metadata
+  - `query_embeddings()`: Retrieve cached embeddings
+  - `delete_model_embeddings()`: Delete all embeddings for a model/project
+
+- **`config_manager.py`**: Configuration management using dataclass pattern. Provides:
+  - `AppConfig`: Dataclass with all configuration fields and defaults
+  - `load()` / `save()`: Persist configuration to JSON
+  - `get_db_paths()` / `check_databases_exist()`: Database path utilities
+  - Legacy wrapper functions for backward compatibility
+
+- **`services.py`**: Business logic services (MVC pattern). Contains:
+  - `StatsService`: Corpus and embedding statistics retrieval
+  - `ClusterService`: Cluster operations (save for drill-down analysis)
+  - `CorpusStats` / `EmbeddingStats`: Data classes for statistics
+
+### Utilities (`utils/`)
+
+- **`dependencies.py`**: Dependency checking for spaCy transformer models
 
 ### Entry Points
 
@@ -106,7 +129,40 @@ Interactive HTML plots
 - `wsi_algorithm`: `hdbscan`, `kmeans`, `spectral`, or `agglomerative`
 - `context_window`: 0 for sentence-only, >0 for surrounding sentences
 
+## Project Structure
+
+```
+├── gui.py                  # Streamlit entry point
+├── main.py                 # CLI entry point
+├── config.json             # Runtime configuration
+├── pyproject.toml          # Dependencies and pytest config
+├── src/
+│   ├── gui_app.py          # Streamlit UI (view layer)
+│   ├── main.py             # CLI analysis logic
+│   ├── semantic_change/
+│   │   ├── config_manager.py   # Configuration dataclass
+│   │   ├── services.py         # Business logic services
+│   │   ├── corpus.py           # SQLite corpus access
+│   │   ├── embedding.py        # Transformer embeddings
+│   │   ├── vector_store.py     # ChromaDB cache
+│   │   ├── wsi.py              # Clustering algorithms
+│   │   └── visualization.py    # Plotly visualizations
+│   └── utils/
+│       └── dependencies.py     # Dependency checking
+├── tests/
+│   ├── conftest.py             # Pytest configuration
+│   ├── test_config_manager.py  # Config tests
+│   ├── test_services.py        # Service layer tests
+│   ├── test_dependencies.py    # Dependency check tests
+│   └── test_vector_store.py    # VectorStore tests
+└── data/
+    ├── corpus_t1.db        # Ingested corpus (period 1)
+    ├── corpus_t2.db        # Ingested corpus (period 2)
+    └── chroma_db/          # Cached embeddings
+```
+
 ## Code Style
 
 - PEP 8 with type hints
 - Docstrings for functions and classes
+- MVC pattern: GUI handles rendering, services handle business logic

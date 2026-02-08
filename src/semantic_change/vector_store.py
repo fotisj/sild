@@ -210,3 +210,47 @@ class VectorStore:
         found_t2 = coll_t2 if coll_t2 in collections else None
 
         return found_t1, found_t2
+
+    def delete_model_embeddings(
+        self,
+        project_id: str,
+        model_name: str
+    ) -> tuple[bool, str, int, int]:
+        """
+        Delete all embeddings for a model in a project.
+
+        This removes both t1 and t2 collections for the specified model.
+
+        Args:
+            project_id: 4-digit project identifier
+            model_name: HuggingFace model name or safe name
+
+        Returns:
+            Tuple of (success, message, count_t1, count_t2) where:
+                - success: True if at least one collection was deleted
+                - message: Combined status message
+                - count_t1: Number of embeddings in t1 before deletion (0 if not found)
+                - count_t2: Number of embeddings in t2 before deletion (0 if not found)
+        """
+        safe_model = model_name.replace("/", "_").replace("-", "_")
+        coll_t1 = f"embeddings_{project_id}_t1_{safe_model}"
+        coll_t2 = f"embeddings_{project_id}_t2_{safe_model}"
+
+        # Get counts before deletion
+        try:
+            count_t1 = self.count(coll_t1)
+        except Exception:
+            count_t1 = 0
+
+        try:
+            count_t2 = self.count(coll_t2)
+        except Exception:
+            count_t2 = 0
+
+        results = []
+        success1, msg1 = self.delete_collection(coll_t1)
+        results.append(msg1)
+        success2, msg2 = self.delete_collection(coll_t2)
+        results.append(msg2)
+
+        return (success1 or success2), "; ".join(results), count_t1, count_t2

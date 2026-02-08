@@ -1,0 +1,37 @@
+[project]
+name = "sild"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=0.4.0",
+    "hdbscan>=0.8.33",
+    "networkx>=3.1",
+    "numpy>=1.24.0,<2.0",
+    "pandas>=2.0.0",
+    "plotly>=5.15.0",
+    "python-louvain>=0.16",
+    "scikit-learn>=1.2.0",
+    "scipy>=1.10.0",
+    "spacy>=3.6.0",
+    "spacy-curated-transformers>=0.2.0",
+    "spacy-transformers>=1.2.0",
+    "stqdm>=0.0.5",
+    "streamlit>=1.27.0",
+    "torch>=2.0.0",
+    "tqdm>=4.65.0",
+    "transformers>=4.48.0",
+    "umap-learn>=0.5.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
