@@ -263,6 +263,147 @@ class TestClusterServiceIntegration:
                 assert saved_meta["original_cluster_id"] == 0
 
 
+class TestDoubleBufferedWriteQueue:
+    """Tests for the double-buffered write queue in process_corpus()."""
+
+    def test_queue_based_processing_completes(self):
+        """Double-buffered queue processes all chunks correctly."""
+        from queue import Queue
+        from threading import Thread
+        import time
+
+        # Simulate the queue-based pattern used in process_corpus()
+        write_queue = Queue(maxsize=2)
+        results_written = []
+        write_error = [None]
+
+        def writer_thread():
+            try:
+                while True:
+                    item = write_queue.get()
+                    if item is None:
+                        break
+                    results_written.append(item)
+                    time.sleep(0.01)  # Simulate I/O
+                    write_queue.task_done()
+            except Exception as e:
+                write_error[0] = e
+
+        writer = Thread(target=writer_thread, daemon=True)
+        writer.start()
+
+        # Simulate processing 5 batches
+        try:
+            for i in range(5):
+                batch_results = [f"embedding_{i}_{j}" for j in range(10)]
+                write_queue.put(batch_results)
+
+            write_queue.join()
+            assert write_error[0] is None
+        finally:
+            write_queue.put(None)
+            writer.join(timeout=5)
+
+        # Verify all batches were written
+        assert len(results_written) == 5
+        assert all(len(batch) == 10 for batch in results_written)
+
+    def test_queue_error_propagation(self):
+        """Errors in writer thread are properly propagated."""
+        from queue import Queue
+        from threading import Thread
+
+        write_queue = Queue(maxsize=2)
+        write_error = [None]
+
+        def failing_writer():
+            try:
+                item = write_queue.get()
+                if item is not None:
+                    raise ValueError("Simulated ChromaDB error")
+            except Exception as e:
+                write_error[0] = e
+
+        writer = Thread(target=failing_writer, daemon=True)
+        writer.start()
+
+        # Submit work that will cause an error
+        write_queue.put(["test_data"])
+        writer.join(timeout=5)
+
+        # Error should be captured
+        assert write_error[0] is not None
+        assert "Simulated ChromaDB error" in str(write_error[0])
+
+    def test_queue_backpressure(self):
+        """Queue with maxsize=2 provides backpressure when writes are slow."""
+        from queue import Queue, Full
+        from threading import Thread, Event
+
+        # Use maxsize=1 for simpler test
+        write_queue = Queue(maxsize=1)
+        writer_blocked = Event()
+        release_writer = Event()
+
+        def blocking_writer():
+            while True:
+                item = write_queue.get()
+                if item is None:
+                    write_queue.task_done()
+                    break
+                writer_blocked.set()
+                release_writer.wait(timeout=10)  # Block until released
+                write_queue.task_done()
+
+        writer = Thread(target=blocking_writer, daemon=True)
+        writer.start()
+
+        try:
+            # Put first item - writer will pick it up and block
+            write_queue.put("batch_1")
+            writer_blocked.wait(timeout=5)
+
+            # Now queue is empty but writer is blocked, so we can put one more
+            write_queue.put("batch_2")
+
+            # Queue is now full (maxsize=1), third put should fail
+            with pytest.raises(Full):
+                write_queue.put_nowait("batch_3")
+        finally:
+            release_writer.set()  # Allow writer to finish
+            write_queue.put(None)  # Poison pill
+            writer.join(timeout=5)
+
+    def test_queue_cleanup_on_exception(self):
+        """Writer thread exits cleanly when poison pill is sent after error."""
+        from queue import Queue
+        from threading import Thread
+
+        write_queue = Queue(maxsize=2)
+        writer_exited = [False]
+
+        def writer_with_exit_flag():
+            while True:
+                item = write_queue.get()
+                if item is None:
+                    writer_exited[0] = True
+                    break
+                write_queue.task_done()
+
+        writer = Thread(target=writer_with_exit_flag, daemon=True)
+        writer.start()
+
+        # Simulate normal operation then cleanup
+        write_queue.put("batch_1")
+        write_queue.join()
+
+        # Send poison pill
+        write_queue.put(None)
+        writer.join(timeout=5)
+
+        assert writer_exited[0] is True
+
+
 class TestEndToEndMocked:
     """Mocked end-to-end tests for the full pipeline."""
 

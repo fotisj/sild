@@ -8,7 +8,9 @@ import argparse
 import glob as globlib
 import json
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
+from threading import Thread
 from typing import List, Dict, Tuple, Set, Any, Union, Type, Optional
 from .embedding import BertEmbedder, detect_optimal_batch_size
 from .vector_store import VectorStore
@@ -187,7 +189,7 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
                    embed_batch_size: int = None, tqdm_class: Type[tqdm_std] = tqdm):
     """
     Orchestrates the processing of a single corpus: collection, embedding extraction, and saving to ChromaDB.
-    Uses async DB writes to overlap with GPU computation.
+    Uses double-buffered writes to overlap GPU computation with ChromaDB I/O.
 
     Args:
         embed_batch_size: Batch size for embedding extraction. If None, auto-detects based on GPU VRAM.
@@ -225,26 +227,51 @@ def process_corpus(db_path: str, collection_name: str, target_words: List[str],
             ids=[f"{collection_name}_{r['lemma']}_{r['pos']}_{r['sentence_id']}_{r['start_char']}" for r in chunk_results]
         )
 
-    # Use thread pool to overlap DB writes with GPU computation
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        pending_future: Future = None
+    # Double-buffered write queue: allows GPU to work on batch N+1 while batch N writes to ChromaDB
+    write_queue: Queue = Queue(maxsize=2)
+    write_error: List[Optional[Exception]] = [None]  # Mutable container for error propagation
 
+    def writer_thread():
+        """Background thread that consumes from write queue and saves to ChromaDB."""
+        try:
+            while True:
+                item = write_queue.get()
+                if item is None:  # Poison pill - signal to exit
+                    break
+                chunk_results = item
+                save_chunk(chunk_results)
+                write_queue.task_done()
+        except Exception as e:
+            write_error[0] = e
+
+    writer = Thread(target=writer_thread, daemon=True)
+    writer.start()
+
+    try:
         with tqdm_class(total=total_sents, desc=desc) as pbar:
             for i in range(0, total_sents, chunk_size):
+                # Check for errors from writer thread
+                if write_error[0] is not None:
+                    raise write_error[0]
+
                 chunk = batch_items[i : i + chunk_size]
                 chunk_results = embedder.batch_extract(chunk, batch_size=embed_batch_size)
 
-                # Wait for previous write to complete before submitting new one
-                if pending_future is not None:
-                    pending_future.result()
-
-                # Submit DB write asynchronously
-                pending_future = executor.submit(save_chunk, chunk_results)
+                if chunk_results:
+                    # Queue the results for writing (blocks if queue is full, providing backpressure)
+                    write_queue.put(chunk_results)
                 pbar.update(len(chunk))
 
-            # Wait for final write
-            if pending_future is not None:
-                pending_future.result()
+        # Wait for all pending writes to complete
+        write_queue.join()
+
+        # Check for errors one more time after all writes complete
+        if write_error[0] is not None:
+            raise write_error[0]
+    finally:
+        # Signal writer thread to exit
+        write_queue.put(None)
+        writer.join(timeout=30)
 
 
 def process_corpus_staged(db_path: str, collection_name: str, target_words: List[str],
